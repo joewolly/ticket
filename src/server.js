@@ -20,17 +20,41 @@ import {
   listTags,
 } from './api/tickets.js';
 import { getStats } from './api/stats.js';
+import {
+  SESSION_COOKIE,
+  authorize,
+  clearFailures,
+  clearedCookie,
+  clientKey,
+  createSession,
+  destroyAllSessions,
+  destroySession,
+  loadAuthConfig,
+  lockoutRemaining,
+  parseCookies,
+  purgeExpiredSessions,
+  recordFailure,
+  sessionCookie,
+  verifyPassword,
+} from './auth.js';
 
 /** Rejects oversized bodies before they are buffered into memory. */
 const MAX_BODY_BYTES = 1024 * 1024;
 
 /**
  * Route table. Patterns use :name segments, matched in order of declaration.
- * Handlers receive ({ db, params, query, body }) and return a JSON-serializable
- * value, or undefined for 204.
+ * Handlers receive ({ db, config, params, query, body, req, res }) and return a
+ * JSON-serializable value, or undefined for 204. The optional fourth element
+ * overrides the response status, which otherwise is 201 for POST and 200 for
+ * everything else.
  */
 const ROUTES = [
   ['GET', '/api/health', () => ({ status: 'ok' })],
+
+  ['POST', '/api/auth/login', login, 200],
+  ['POST', '/api/auth/logout', logout, 200],
+  ['GET', '/api/auth/session', ({ config }) => ({ authenticated: true, enabled: config.enabled })],
+
   ['GET', '/api/stats', ({ db }) => getStats(db)],
   ['GET', '/api/tags', ({ db }) => listTags(db)],
 
@@ -52,7 +76,46 @@ const ROUTES = [
     '/api/tickets/:id/comments/:commentId',
     ({ db, params }) => deleteComment(db, params.id, params.commentId),
   ],
-].map(([method, pattern, handler]) => ({ method, handler, ...compile(pattern) }));
+].map(([method, pattern, handler, status = method === 'POST' ? 201 : 200]) => ({
+  method,
+  handler,
+  status,
+  ...compile(pattern),
+}));
+
+/* ---- Auth handlers ------------------------------------------------------ */
+
+function login({ db, config, body, req, res }) {
+  if (!config.enabled) return { authenticated: true, enabled: false };
+
+  const key = clientKey(req);
+  const locked = lockoutRemaining(key);
+  if (locked) {
+    throw Object.assign(new Error(`Too many attempts. Try again in ${locked} seconds.`), {
+      status: 429,
+    });
+  }
+
+  if (!verifyPassword(config, body.password)) {
+    recordFailure(key);
+    throw Object.assign(new Error('Incorrect password'), { status: 401 });
+  }
+
+  clearFailures(key);
+  const { token, expiresAt } = createSession(db, config, req.headers['user-agent']);
+  res.setHeader('Set-Cookie', sessionCookie(token, config, expiresAt));
+  return { authenticated: true, enabled: true };
+}
+
+function logout({ db, config, body, req, res }) {
+  const { [SESSION_COOKIE]: token } = parseCookies(req.headers.cookie);
+
+  if (body?.everywhere) destroyAllSessions(db);
+  else destroySession(db, token);
+
+  res.setHeader('Set-Cookie', clearedCookie(config));
+  return { authenticated: false };
+}
 
 /** Turns '/api/tickets/:id' into a regex plus the list of parameter names. */
 function compile(pattern) {
@@ -125,13 +188,28 @@ function sendJson(res, status, payload) {
 }
 
 /** Builds the request handler against an already-open database. */
-export function createApp(db) {
+export function createApp(db, config = { enabled: false }) {
   return async function handle(req, res) {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
     const { pathname } = url;
 
+    // Nothing but the login page and its endpoint is reachable without a
+    // session, so this gate runs before routing and before any file is read.
+    if (authorize(db, config, req, pathname)) {
+      if (pathname.startsWith('/api/')) {
+        return sendJson(res, 401, { error: 'Authentication required' });
+      }
+      return res.writeHead(302, { Location: '/login' }).end();
+    }
+
     if (!pathname.startsWith('/api/')) {
-      const served = await serveStatic(req, res, pathname).catch(() => false);
+      // An authenticated visitor has no use for the login page.
+      if (pathname === '/login' && (!config.enabled || !authorize(db, config, req, '/'))) {
+        return res.writeHead(302, { Location: '/' }).end();
+      }
+
+      const file = pathname === '/login' ? '/login.html' : pathname;
+      const served = await serveStatic(req, res, file).catch(() => false);
       if (!served) sendJson(res, 404, { error: 'Not found' });
       return;
     }
@@ -146,13 +224,16 @@ export function createApp(db) {
       const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
       const result = await matched.route.handler({
         db,
+        config,
         params: matched.params,
         query: Object.fromEntries(url.searchParams),
         body,
+        req,
+        res,
       });
 
       if (result === undefined) return res.writeHead(204).end();
-      sendJson(res, req.method === 'POST' ? 201 : 200, result);
+      sendJson(res, matched.route.status, result);
     } catch (err) {
       if (err.status) return sendJson(res, err.status, { error: err.message });
       console.error(`${req.method} ${pathname} failed:`, err);
@@ -161,8 +242,8 @@ export function createApp(db) {
   };
 }
 
-export function createServer(db) {
-  return http.createServer(createApp(db));
+export function createServer(db, config) {
+  return http.createServer(createApp(db, config));
 }
 
 /** Entry point — only runs when this file is executed directly. */
@@ -171,11 +252,25 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const host = process.env.HOST ?? '0.0.0.0';
   const dbPath = process.env.DB_PATH ?? './data/homelab.db';
 
+  let config;
+  try {
+    config = loadAuthConfig();
+  } catch (err) {
+    console.error(`\nRefusing to start: ${err.message}\n`);
+    process.exit(1);
+  }
+
   const db = openDatabase(dbPath);
-  const server = createServer(db);
+  purgeExpiredSessions(db);
+  const server = createServer(db, config);
 
   server.listen(port, host, () => {
     console.log(`homelab-ticket listening on http://${host}:${port} (db: ${dbPath})`);
+    console.log(
+      config.enabled
+        ? `auth: password${config.apiToken ? ' + API token' : ''}`
+        : 'auth: DISABLED — anyone who can reach this port has full access',
+    );
   });
 
   const shutdown = (signal) => {

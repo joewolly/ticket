@@ -458,6 +458,39 @@ label { display: block; font-size: 12px; font-weight: 600; color: var(--text-mut
 }
 .empty-state strong { display: block; color: var(--text); margin-bottom: 4px; }
 
+/* ---- Login -------------------------------------------------------------- */
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  padding: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.login-error {
+  margin: 12px 0 0;
+  color: var(--critical);
+  font-size: 13px;
+  text-align: center;
+}
+
 .muted { color: var(--text-muted); }
 .mono { font-family: var(--mono); }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

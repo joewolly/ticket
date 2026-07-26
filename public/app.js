@@ -31,6 +31,13 @@ async function api(path, { method = 'GET', body } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
 
+  // The session expired or was revoked — bounce to the login page rather than
+  // leaving the user staring at errors on every panel.
+  if (res.status === 401) {
+    location.replace('/login');
+    throw new Error('Session expired');
+  }
+
   if (res.status === 204) return null;
 
   const payload = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
@@ -999,6 +1006,25 @@ async function render() {
   view.replaceWith(next);
 }
 
+/* ---- Session ------------------------------------------------------------ */
+
+/** Reveals the sign-out control only when a password is actually in force. */
+async function initSession() {
+  const button = document.getElementById('sign-out');
+  const session = await api('/auth/session').catch(() => null);
+  if (!session?.enabled) return;
+
+  button.hidden = false;
+  button.addEventListener(
+    'click',
+    guard(async () => {
+      await api('/auth/logout', { method: 'POST' });
+      location.replace('/login');
+    }),
+  );
+}
+
 window.addEventListener('hashchange', render);
 document.getElementById('new-ticket').addEventListener('click', () => newTicketModal());
+initSession();
 render();

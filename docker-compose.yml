@@ -11,8 +11,16 @@ services:
       # Named volume keeps the SQLite file across container rebuilds.
       # Swap for a bind mount (e.g. ./data:/data) if you back up by file.
       - ticket-data:/data
+    # Values come from a .env file next to this one — see .env.example.
+    # The container refuses to start unless AUTH_PASSWORD is set, or you opt
+    # out of authentication deliberately with AUTH_DISABLED=true.
     environment:
       TZ: ${TZ:-UTC}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-}
+      API_TOKEN: ${API_TOKEN:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+      SESSION_DAYS: ${SESSION_DAYS:-30}
 
 volumes:
   ticket-data:
