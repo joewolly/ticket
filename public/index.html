@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Homelab Tickets</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🛠️</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/">
+        <span class="brand-mark">▪</span>
+        <span>Homelab</span>
+      </a>
+      <nav class="tabs">
+        <a href="#/" data-tab="dashboard">Dashboard</a>
+        <a href="#/tickets" data-tab="tickets">Tickets</a>
+        <a href="#/devices" data-tab="devices">Devices</a>
+      </nav>
+      <div class="topbar-actions">
+        <button class="btn btn-primary" id="new-ticket">New ticket</button>
+      </div>
+    </header>
+
+    <main id="view" aria-live="polite"></main>
+
+    <div id="modal-root"></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

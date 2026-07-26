@@ -1,0 +1,18 @@
+services:
+  ticket:
+    build: .
+    image: homelab-ticket
+    container_name: homelab-ticket
+    restart: unless-stopped
+    ports:
+      # Change the left-hand port if 8080 is already taken on your host.
+      - "8080:8080"
+    volumes:
+      # Named volume keeps the SQLite file across container rebuilds.
+      # Swap for a bind mount (e.g. ./data:/data) if you back up by file.
+      - ticket-data:/data
+    environment:
+      TZ: ${TZ:-UTC}
+
+volumes:
+  ticket-data:
