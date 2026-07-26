@@ -1,0 +1,15 @@
+{
+  "name": "homelab-ticket",
+  "version": "1.0.0",
+  "description": "A self-hosted ticket system and device inventory for a personal homelab",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite src/server.js",
+    "dev": "node --experimental-sqlite --watch src/server.js",
+    "test": "node --experimental-sqlite --test \"test/*.test.js\""
+  }
+}

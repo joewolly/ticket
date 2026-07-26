@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Sign in · Homelab Tickets</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🛠️</text></svg>"
+    />
+  </head>
+  <body class="login-body">
+    <main class="login-card">
+      <div class="login-brand">
+        <span class="brand-mark">▪</span>
+        <span>Homelab Tickets</span>
+      </div>
+
+      <form id="login-form">
+        <div class="field">
+          <label for="password">Password</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            autofocus
+          />
+        </div>
+        <button class="btn btn-primary" type="submit" style="width: 100%">Sign in</button>
+        <p id="error" class="login-error" role="alert" hidden></p>
+      </form>
+    </main>
+
+    <script type="module" src="/login.js"></script>
+  </body>
+</html>
