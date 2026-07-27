@@ -232,10 +232,12 @@ label { display: block; font-size: 12px; font-weight: 600; color: var(--text-mut
 .stat .label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 
 /* Two columns on a wide screen keeps the four cards a balanced 2x2 block
-   rather than wrapping 3 + 1. */
+   rather than wrapping 3 + 1. The min() is what stops that 420px floor from
+   becoming a 420px column on a 390px phone, which scrolled the whole page
+   sideways. */
 .dash-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
   gap: 16px;
   align-items: start;
 }
@@ -491,14 +493,74 @@ label { display: block; font-size: 12px; font-weight: 600; color: var(--text-mut
   text-align: center;
 }
 
+/* ---- Links on a ticket -------------------------------------------------- */
+.link-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.link-form input[name="url"] { flex: 2; }
+.link-form input[name="label"] { flex: 1; }
+.link-form button { white-space: nowrap; }
+
+.mini-list a[target="_blank"] { overflow-wrap: anywhere; }
+
+/* ---- Export ------------------------------------------------------------- */
+.export-links { margin-left: 6px; }
+.export-links a {
+  color: var(--text-muted);
+  border-bottom: 1px dotted var(--border-strong);
+}
+.export-links a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---- Keyboard shortcuts ------------------------------------------------- */
+.shortcut-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 16px;
+  margin: 0;
+  align-items: center;
+  font-size: 13px;
+}
+.shortcut-list dt { white-space: nowrap; color: var(--text-muted); }
+.shortcut-list dd { margin: 0; }
+
+kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: center;
+}
+
 .muted { color: var(--text-muted); }
 .mono { font-family: var(--mono); }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 
 @media (max-width: 640px) {
-  .topbar { gap: 12px; padding: 0 12px; }
+  .topbar { gap: 10px; padding: 0 12px; }
   .brand span:last-child { display: none; }
   .tabs a { padding: 6px 9px; font-size: 13px; }
+  /* Four tabs no longer fit a narrow phone. Letting the nav scroll inside
+     itself keeps the page from scrolling sideways as a whole. */
+  .tabs {
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs a { flex: none; white-space: nowrap; }
+  .topbar-actions { flex: none; }
+  /* Nothing to trigger without a keyboard. */
+  #shortcuts { display: none; }
   main { padding: 20px 12px 60px; }
   .detail-grid { grid-template-columns: 1fr; }
+  .link-form { flex-wrap: wrap; }
+  .link-form input { flex: 1 1 100%; }
 }
