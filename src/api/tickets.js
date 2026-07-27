@@ -6,9 +6,11 @@ import {
   NotFoundError,
   ValidationError,
   bodyText,
+  httpUrl,
   oneOf,
   optionalDate,
   optionalId,
+  optionalText,
   requiredText,
   tagList,
 } from '../validate.js';
@@ -77,7 +79,7 @@ export function listTickets(db, query = {}) {
   return db.prepare(sql).all(params).map(shapeTicket);
 }
 
-/** Returns the ticket plus its comment thread, oldest first. */
+/** Returns the ticket plus its comment thread and links, oldest first. */
 export function getTicket(db, id) {
   const row = db.prepare(`${SELECT_TICKET} WHERE t.id = ?`).get(id);
   if (!row) throw new NotFoundError(`No ticket with id ${id}`);
@@ -86,21 +88,32 @@ export function getTicket(db, id) {
     .prepare('SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC, id ASC')
     .all(id);
 
-  return { ...shapeTicket(row), comments };
+  const links = db
+    .prepare('SELECT * FROM ticket_links WHERE ticket_id = ? ORDER BY created_at ASC, id ASC')
+    .all(id);
+
+  return { ...shapeTicket(row), comments, links };
 }
 
-export function createTicket(db, input = {}) {
+/**
+ * Creates a ticket. `scheduleId` is a caller-side concern rather than an input
+ * field, so an API client cannot claim a ticket came from a schedule.
+ */
+export function createTicket(db, input = {}, { scheduleId = null } = {}) {
   const fields = parseTicket(input, { partial: false });
   const tags = tagList(input.tags) ?? [];
 
   if (fields.device_id !== null) assertDeviceExists(db, fields.device_id);
   fields.resolved_at = CLOSED_STATUSES.includes(fields.status) ? isoNow() : null;
+  fields.schedule_id = scheduleId;
 
   return transaction(db, () => {
     const { lastInsertRowid } = db
       .prepare(
-        `INSERT INTO tickets (title, body, status, priority, device_id, due_date, resolved_at)
-         VALUES (:title, :body, :status, :priority, :device_id, :due_date, :resolved_at)`,
+        `INSERT INTO tickets
+           (title, body, status, priority, device_id, due_date, resolved_at, schedule_id)
+         VALUES
+           (:title, :body, :status, :priority, :device_id, :due_date, :resolved_at, :schedule_id)`,
       )
       .run(fields);
 
@@ -120,6 +133,12 @@ export function updateTicket(db, id, input = {}) {
     throw new ValidationError('No updatable fields provided');
   }
   if (fields.device_id) assertDeviceExists(db, fields.device_id);
+
+  // Moving the due date re-arms the overdue notification: a ticket deferred to
+  // next month should be announced again if it lapses again.
+  if (Object.hasOwn(fields, 'due_date') && fields.due_date !== existing.due_date) {
+    fields.overdue_notified_at = null;
+  }
 
   // Stamp resolved_at on the transition into a closed status, and clear it on
   // the way back out, so "when was this fixed?" stays answerable after reopens.
@@ -171,6 +190,29 @@ export function deleteComment(db, ticketId, commentId) {
     .get(commentId, ticketId);
   if (!comment) throw new NotFoundError(`No comment with id ${commentId} on ticket ${ticketId}`);
   db.prepare('DELETE FROM comments WHERE id = ?').run(commentId);
+}
+
+/** Attaches a reference URL to a ticket. */
+export function addLink(db, ticketId, input = {}) {
+  getTicket(db, ticketId);
+  const url = httpUrl(input.url, 'url');
+  const label = optionalText(input.label, 'label', 200);
+
+  return transaction(db, () => {
+    const { lastInsertRowid } = db
+      .prepare('INSERT INTO ticket_links (ticket_id, url, label) VALUES (?, ?, ?)')
+      .run(ticketId, url, label);
+    db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(ticketId);
+    return db.prepare('SELECT * FROM ticket_links WHERE id = ?').get(Number(lastInsertRowid));
+  });
+}
+
+export function deleteLink(db, ticketId, linkId) {
+  const link = db
+    .prepare('SELECT 1 FROM ticket_links WHERE id = ? AND ticket_id = ?')
+    .get(linkId, ticketId);
+  if (!link) throw new NotFoundError(`No link with id ${linkId} on ticket ${ticketId}`);
+  db.prepare('DELETE FROM ticket_links WHERE id = ?').run(linkId);
 }
 
 /** All tags in use, with how many tickets carry each. */

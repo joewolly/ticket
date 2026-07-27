@@ -103,6 +103,50 @@ export function optionalDate(value, field) {
 }
 
 /**
+ * Validates a link target. Only http and https are accepted — a stored
+ * `javascript:` or `data:` URL would become a script the moment the UI renders
+ * it as an anchor, so the scheme is constrained here rather than at the point
+ * of display, where one forgetful template would undo it.
+ */
+export function httpUrl(value, field) {
+  const text = requiredText(value, field, 2000);
+
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new ValidationError(`${field} must be a valid URL, including the scheme`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ValidationError(`${field} must be an http or https URL`);
+  }
+  return url.toString();
+}
+
+/** A whole number within bounds, for intervals and offsets. */
+export function boundedInt(value, field, { min, max, fallback } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (fallback === undefined) throw new ValidationError(`${field} is required`);
+    return fallback;
+  }
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(number)) throw new ValidationError(`${field} must be a whole number`);
+  if (number < min || number > max) {
+    throw new ValidationError(`${field} must be between ${min} and ${max}`);
+  }
+  return number;
+}
+
+/** Accepts real booleans and the strings a form or query string would send. */
+export function boolean(value, field, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (value === 'true' || value === 1 || value === '1') return true;
+  if (value === 'false' || value === 0 || value === '0') return false;
+  throw new ValidationError(`${field} must be true or false`);
+}
+
+/**
  * Normalizes a tag list: lowercased, deduplicated, whitespace collapsed to
  * hyphens so "Needs Parts" and "needs-parts" are the same tag.
  */
