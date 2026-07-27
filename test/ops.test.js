@@ -39,6 +39,37 @@ test('an instance that sets only a password gets every extra switched off', () =
   assert.equal(config.log.level, 'info');
 });
 
+test('treats the empty strings docker compose passes as unset', () => {
+  // `FOO: ${FOO:-}` in a compose file sends "" rather than omitting the
+  // variable, so every optional setting has to read that as "not configured".
+  const config = loadConfig({
+    ...baseEnv,
+    TRUST_PROXY: '',
+    PUBLIC_HEALTH: '',
+    RATE_LIMIT_PER_MINUTE: '',
+    LOG_LEVEL: '',
+    LOG_FORMAT: '',
+    NOTIFY_URL: '',
+    NOTIFY_FORMAT: '',
+    NOTIFY_EVENTS: '',
+    NOTIFY_MIN_PRIORITY: '',
+    NOTIFY_TIMEOUT_MS: '',
+    BACKUP_DIR: '',
+    BACKUP_INTERVAL_HOURS: '',
+    BACKUP_KEEP: '',
+    MAINTENANCE_INTERVAL_MINUTES: '',
+    SESSION_DAYS: '',
+  });
+
+  assert.equal(config.trustProxy, false);
+  assert.equal(config.notify.enabled, false);
+  assert.equal(config.backup.enabled, false);
+  assert.equal(config.rateLimit.perMinute, 300);
+  assert.equal(config.maintenanceMinutes, 60);
+  assert.equal(config.sessionDays, 30);
+  assert.equal(config.log.level, 'info');
+});
+
 test('refuses to start on a malformed value rather than falling back', () => {
   assert.throws(() => loadConfig({ ...baseEnv, RATE_LIMIT_PER_MINUTE: 'lots' }), /whole number/);
   assert.throws(() => loadConfig({ ...baseEnv, TRUST_PROXY: 'maybe' }), /must be true or false/);

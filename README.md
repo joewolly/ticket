@@ -21,7 +21,7 @@ To run it directly instead:
 ```sh
 AUTH_PASSWORD=your-long-passphrase npm start   # http://localhost:8080
 npm run dev                                    # same, with auto-restart
-npm test                                       # 68 tests, no network needed
+npm test                                       # 149 tests, no network needed
 ```
 
 Node 22.5+ is required (for the built-in `node:sqlite` module).
@@ -29,9 +29,9 @@ Node 22.5+ is required (for the built-in `node:sqlite` module).
 ## What it does
 
 **Tickets** carry a status (`open`, `in_progress`, `blocked`, `resolved`,
-`closed`), a priority, optional tags, an optional due date, and a comment
-thread for notes as you work the problem. The default list view shows only
-what still needs attention, sorted most urgent first.
+`closed`), a priority, optional tags, an optional due date, reference links, and
+a comment thread for notes as you work the problem. The default list view shows
+only what still needs attention, sorted most urgent first.
 
 **Devices** are the things you own — servers, NAS, switches, VMs, Pis. Each
 device shows its open tickets and its full service history, so "what have I
@@ -39,9 +39,43 @@ done to this box before?" stays answerable. Deleting a device keeps its
 tickets and just unlinks them; the history of a machine you no longer own is
 usually the part worth keeping.
 
+**Schedules** are recurring maintenance — dust filters, cert renewals, battery
+swaps, pool scrubs. A schedule is a ticket template plus a cadence, and it opens
+a real ticket when the work comes due. See [Recurring maintenance](#recurring-maintenance).
+
 **The dashboard** surfaces open counts by priority, which devices have the most
 unresolved work, anything overdue, and anything open that hasn't been touched
 in two weeks — the tickets you forgot rather than finished.
+
+Everything is also reachable by keyboard: `n` for a new ticket, `/` to search,
+`g` then `d`/`t`/`v`/`s` to move between pages, and `?` for the full list.
+
+## Recurring maintenance
+
+A schedule carries the ticket it will open — title, description, priority,
+device, tags — plus how often, and how far ahead of the due date to open it:
+
+```sh
+curl -X POST http://localhost:8080/api/schedules \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Replace NAS dust filters","interval_days":90,"lead_days":7,"device_id":1}'
+```
+
+That opens a ticket a week before each quarterly due date. `next_due` defaults
+to today, so a new schedule proves itself on the next sweep rather than going
+quiet until its first interval elapses; set it explicitly for work that is not
+due yet.
+
+**A schedule that fell behind generates one ticket, not one per missed
+interval.** Coming back from a month of downtime to thirty identical "check the
+disks" tickets would be noise. The single ticket keeps the date it was genuinely
+due, so the backlog is visible rather than hidden, and the schedule then
+advances to its next future occurrence.
+
+Schedules are swept hourly by default, along with the overdue check. If you
+would rather drive that from cron, set `MAINTENANCE_INTERVAL_MINUTES=0` and post
+to `/api/maintenance/run` yourself.
 
 ## Authentication
 
@@ -72,6 +106,14 @@ curl -X POST http://localhost:8080/api/tickets \
   -d '{"title":"Backup job failed","priority":"high","device_id":1}'
 ```
 
+**Behind a reverse proxy, set `TRUST_PROXY=true`.** Without it every request
+arrives from the proxy's address, so the login lockout and the rate limiter see
+one client and a single attacker locks out the household. It is off by default
+because the opposite mistake is worse: any client can send `X-Forwarded-For`, so
+trusting it when no proxy is in front lets an attacker rotate the header and
+guess passwords indefinitely. Only turn it on when something you control really
+does sit in front.
+
 Two caveats worth knowing. Serving over plain HTTP means the password crosses
 your LAN in the clear — fine against the casual case this is built for, not
 against someone already on your network; put it behind HTTPS if that matters,
@@ -79,30 +121,92 @@ and set `COOKIE_SECURE=true` when you do. And the password lives in an
 environment variable, so anyone who can read your `.env` or run `docker
 inspect` can read it.
 
-## Configuration
+## Notifications
 
-| Variable        | Default             | Purpose                                       |
-| --------------- | ------------------- | --------------------------------------------- |
-| `AUTH_PASSWORD` | *(required)*        | Sign-in password, minimum 8 characters        |
-| `AUTH_DISABLED` | unset               | Deliberately run with no authentication       |
-| `API_TOKEN`     | unset               | Bearer token for scripts, minimum 16 chars    |
-| `SESSION_DAYS`  | `30`                | Session lifetime before re-authenticating     |
-| `COOKIE_SECURE` | `false`             | Add `Secure` to the cookie — set when on HTTPS |
-| `PORT`          | `8080`              | Port to listen on                             |
-| `HOST`          | `0.0.0.0`           | Bind address                                  |
-| `DB_PATH`       | `./data/homelab.db` | SQLite file (`/data/homelab.db` in Docker)    |
-| `TZ`            | `UTC`               | Container timezone                            |
+Point `NOTIFY_URL` at a webhook to hear about tickets without watching the
+dashboard:
+
+```sh
+NOTIFY_URL=https://ntfy.sh/my-homelab-topic
+NOTIFY_FORMAT=ntfy                     # or json, the default
+NOTIFY_MIN_PRIORITY=high               # stay quiet about small things
+NOTIFY_EVENTS=ticket.created,ticket.overdue,schedule.fired
+```
+
+`json` posts a JSON body describing the event and ticket; `ntfy` sends a
+plain-text body with the title and priority in headers, which is what
+[ntfy](https://ntfy.sh) expects.
+
+Delivery is best-effort by design: a webhook that is down logs a warning and
+never fails the API request that triggered it. Overdue tickets are announced
+once per lapse rather than every day until you deal with them, and moving a due
+date re-arms the alert.
 
 ## Backups
 
-Everything is in the one SQLite file. To snapshot it safely while the app is
-running, use SQLite's online backup rather than copying the file:
+Everything is in the one SQLite file. Set `BACKUP_DIR` and the app snapshots
+itself on a timer, keeping the most recent `BACKUP_KEEP` files:
+
+```sh
+BACKUP_DIR=/data/backups
+BACKUP_INTERVAL_HOURS=24
+BACKUP_KEEP=7
+```
+
+Snapshots use SQLite's `VACUUM INTO`, which is safe against a live database —
+unlike copying the file, which can capture a torn state. Pruning only ever
+touches files the app itself wrote.
+
+To take one by hand instead:
 
 ```sh
 docker compose exec ticket \
   node -e "const{DatabaseSync}=require('node:sqlite');new DatabaseSync('/data/homelab.db').exec(\"VACUUM INTO '/data/backup.db'\")"
 docker compose cp ticket:/data/backup.db ./homelab-backup.db
 ```
+
+## Metrics and export
+
+`GET /api/metrics` returns Prometheus text exposition — open counts by priority,
+overdue and stale totals, devices by status, schedules due — so a homelab that
+already runs Grafana can graph its backlog alongside everything else. Labels
+come only from fixed enums, never device names, so cardinality stays bounded.
+
+`GET /api/export?entity=tickets&format=csv` dumps tickets, devices, or schedules
+as CSV or JSON. Exports include closed tickets, since the point is an archive
+rather than the working list. The same links are on each page in the UI.
+
+## Configuration
+
+Only `AUTH_PASSWORD` is required. Everything else is off or sensibly defaulted,
+and a malformed value stops the app at startup rather than being quietly
+ignored.
+
+| Variable                       | Default             | Purpose                                        |
+| ------------------------------ | ------------------- | ---------------------------------------------- |
+| `AUTH_PASSWORD`                | *(required)*        | Sign-in password, minimum 8 characters         |
+| `AUTH_DISABLED`                | unset               | Deliberately run with no authentication        |
+| `API_TOKEN`                    | unset               | Bearer token for scripts, minimum 16 chars     |
+| `SESSION_DAYS`                 | `30`                | Session lifetime before re-authenticating      |
+| `COOKIE_SECURE`                | `false`             | Add `Secure` to the cookie — set when on HTTPS |
+| `TRUST_PROXY`                  | `false`             | Read `X-Forwarded-For` — only behind a proxy   |
+| `PUBLIC_HEALTH`                | `false`             | Allow `/api/health` without authentication     |
+| `RATE_LIMIT_PER_MINUTE`        | `300`               | API requests per client per minute; `0` is off |
+| `LOG_LEVEL`                    | `info`              | `debug` adds an access log                     |
+| `LOG_FORMAT`                   | `text`              | `json` for a log shipper                       |
+| `NOTIFY_URL`                   | unset               | Webhook for ticket events                      |
+| `NOTIFY_FORMAT`                | `json`              | `json` or `ntfy`                               |
+| `NOTIFY_EVENTS`                | created, overdue, fired | Which events to send                       |
+| `NOTIFY_MIN_PRIORITY`          | `low`               | Stay quiet below this priority                 |
+| `NOTIFY_TIMEOUT_MS`            | `5000`              | How long to wait on the webhook                |
+| `BACKUP_DIR`                   | unset               | Enable scheduled backups by setting this       |
+| `BACKUP_INTERVAL_HOURS`        | `24`                | How often to snapshot                          |
+| `BACKUP_KEEP`                  | `7`                 | Snapshots to retain                            |
+| `MAINTENANCE_INTERVAL_MINUTES` | `60`                | Schedule and overdue sweep; `0` to use cron    |
+| `PORT`                         | `8080`              | Port to listen on                              |
+| `HOST`                         | `0.0.0.0`           | Bind address                                   |
+| `DB_PATH`                      | `./data/homelab.db` | SQLite file (`/data/homelab.db` in Docker)     |
+| `TZ`                           | `UTC`               | Container timezone                             |
 
 ## API
 
@@ -114,17 +218,27 @@ tickets too — useful for having a monitoring script open a ticket on failure.
 | `GET`    | `/api/stats`                     | Dashboard summary           |
 | `GET`    | `/api/tickets`                   | List / filter tickets       |
 | `POST`   | `/api/tickets`                   | Create a ticket             |
-| `GET`    | `/api/tickets/:id`               | One ticket, with comments   |
+| `GET`    | `/api/tickets/:id`               | One ticket, with comments and links |
 | `PATCH`  | `/api/tickets/:id`               | Update any subset of fields |
 | `DELETE` | `/api/tickets/:id`               | Delete a ticket             |
 | `POST`   | `/api/tickets/:id/comments`      | Add a note                  |
 | `DELETE` | `/api/tickets/:id/comments/:cid` | Delete a note               |
+| `POST`   | `/api/tickets/:id/links`         | Attach a reference URL      |
+| `DELETE` | `/api/tickets/:id/links/:lid`    | Remove a link               |
 | `GET`    | `/api/devices`                   | List / filter devices       |
 | `POST`   | `/api/devices`                   | Register a device           |
 | `GET`    | `/api/devices/:id`               | One device                  |
 | `PATCH`  | `/api/devices/:id`               | Update any subset of fields |
 | `DELETE` | `/api/devices/:id`               | Delete a device             |
+| `GET`    | `/api/schedules`                 | List / filter schedules     |
+| `POST`   | `/api/schedules`                 | Create a schedule           |
+| `GET`    | `/api/schedules/:id`             | One schedule, with the tickets it made |
+| `PATCH`  | `/api/schedules/:id`             | Update any subset of fields |
+| `DELETE` | `/api/schedules/:id`             | Delete a schedule           |
+| `POST`   | `/api/maintenance/run`           | Fire due schedules and sweep overdue |
 | `GET`    | `/api/tags`                      | Tags in use, with counts    |
+| `GET`    | `/api/export`                    | CSV or JSON dump            |
+| `GET`    | `/api/metrics`                   | Prometheus metrics          |
 | `POST`   | `/api/auth/login`                | Exchange the password for a session |
 | `POST`   | `/api/auth/logout`               | End this session (`{"everywhere":true}` ends all) |
 | `GET`    | `/api/auth/session`              | Whether auth is on          |
@@ -138,19 +252,35 @@ Ticket list filters: `status` (a specific status, or `all`; defaults to
 everything unresolved), `priority`, `device_id`, `tag`, `q` (text search), and
 `sort` (`priority`, `newest`, `oldest`, `updated`, `due`).
 
+Schedule list filters: `paused` and `device_id`.
+
+Export parameters: `entity` (`tickets`, `devices`, `schedules`), `format`
+(`json`, `csv`), and for tickets an optional `status`.
+
 ## Layout
 
 ```
 src/
   server.js      HTTP server, routing, the auth gate, error mapping
-  auth.js        Config, sessions, login throttling, cookies, API tokens
+  auth.js        Sessions, login throttling, cookies, API tokens
+  config.js      The whole runtime configuration, read once at startup
+  env.js         Environment parsing helpers that refuse malformed values
   db.js          Schema, versioned migrations, transaction helper
   validate.js    Input validation and the domain enums
+  log.js         Structured logging, text or JSON
+  ratelimit.js   Per-client request limiter
+  notify.js      Webhook delivery and the overdue sweep
+  backup.js      VACUUM INTO snapshots with retention
   static.js      Static file serving for the frontend
-  api/           devices.js, tickets.js, stats.js — the data layer
+  api/           devices.js, tickets.js, schedules.js, stats.js,
+                 export.js, metrics.js — the data layer
 public/          index.html, app.js, login.html, styles.css — dependency-free SPA
 test/            Unit tests per module plus HTTP integration tests
 ```
 
 Schema changes go in the `MIGRATIONS` array in `src/db.js` — append a new
 entry, never edit an existing one, and it will apply itself on next start.
+
+`transaction()` nests: a call made while a transaction is already open joins it
+through a savepoint. That is what lets a composite operation like firing a
+schedule reuse the same data-layer helpers as everything else.

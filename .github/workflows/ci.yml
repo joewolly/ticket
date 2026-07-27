@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  # Node ships new releases regularly and node:sqlite is still experimental,
+  # so a weekly run catches an upstream change before a deploy does.
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor the package.json engines field claims; 24 is where
+        # node:sqlite stops being experimental and the --experimental-sqlite
+        # flag becomes unnecessary.
+        node: ['22', '24']
+    name: test (node ${{ matrix.node }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies to install, so there is nothing to cache and no
+      # lockfile to audit — that is the whole point of the design.
+      - name: Show versions
+        run: node --version && npm --version
+
+      # node:sqlite is stable from Node 24, where --experimental-sqlite is no
+      # longer needed and may not be accepted. Probing for the flag rather than
+      # branching on a version number means this keeps working through whichever
+      # release finally drops it.
+      - name: Run tests
+        run: |
+          if node --experimental-sqlite -e '' 2>/dev/null; then
+            echo "--experimental-sqlite accepted; running the documented command"
+            npm test
+          else
+            echo "--experimental-sqlite rejected; node:sqlite is stable here"
+            node --test "test/*.test.js"
+          fi
+
+  smoke:
+    runs-on: ubuntu-latest
+    name: smoke (real server)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Refuse to start without a password
+        run: |
+          if node --experimental-sqlite src/server.js; then
+            echo "started with no AUTH_PASSWORD, which must never happen"
+            exit 1
+          fi
+          echo "refused to start, as intended"
+
+      - name: Start, exercise, and stop
+        env:
+          AUTH_PASSWORD: ci-test-passphrase
+          PORT: '8080'
+          DB_PATH: ./data/ci.db
+          PUBLIC_HEALTH: 'true'
+        run: |
+          node --experimental-sqlite src/server.js &
+          server=$!
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/api/health && break
+            sleep 1
+          done
+
+          # Unauthenticated API calls must be refused.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/tickets)
+          test "$code" = "401" || { echo "expected 401, got $code"; exit 1; }
+
+          # A signed-in session can drive the whole thing.
+          curl -s -c jar -X POST http://127.0.0.1:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"ci-test-passphrase"}' > /dev/null
+          curl -sf -b jar -X POST http://127.0.0.1:8080/api/tickets \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"CI smoke ticket","priority":"high"}' > /dev/null
+          curl -sf -b jar 'http://127.0.0.1:8080/api/export?entity=tickets&format=csv' | grep -q 'CI smoke ticket'
+          curl -sf -b jar http://127.0.0.1:8080/api/metrics | grep -q homelab_tickets_open
+
+          kill "$server"
+
+      - name: Survive a restart with the same database
+        env:
+          AUTH_PASSWORD: ci-test-passphrase
+          PORT: '8080'
+          DB_PATH: ./data/ci.db
+          PUBLIC_HEALTH: 'true'
+        run: |
+          node --experimental-sqlite src/server.js &
+          server=$!
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/api/health && break
+            sleep 1
+          done
+          curl -s -c jar -X POST http://127.0.0.1:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"ci-test-passphrase"}' > /dev/null
+          curl -sf -b jar 'http://127.0.0.1:8080/api/tickets?status=all' | grep -q 'CI smoke ticket'
+          kill "$server"
+
+  docker:
+    runs-on: ubuntu-latest
+    name: docker image
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t homelab-ticket:ci .
+
+      - name: Run it and wait for the healthcheck to pass
+        run: |
+          docker run -d --name ticket -p 8080:8080 \
+            -e AUTH_PASSWORD=ci-test-passphrase \
+            homelab-ticket:ci
+
+          # The image declares a HEALTHCHECK; letting Docker itself decide is
+          # the only way to catch a healthcheck that never reports healthy.
+          for i in $(seq 1 60); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' ticket)
+            echo "health: $state"
+            [ "$state" = "healthy" ] && break
+            [ "$state" = "unhealthy" ] && { docker logs ticket; exit 1; }
+            sleep 2
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' ticket)" = "healthy"
+
+      - name: Check it serves the app
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/tickets)
+          test "$code" = "401" || { echo "expected 401, got $code"; exit 1; }
+          curl -sf -o /dev/null http://127.0.0.1:8080/login
+
+      - name: Confirm it runs unprivileged
+        run: |
+          test "$(docker exec ticket id -u)" != "0" || { echo "running as root"; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: docker logs ticket || true
