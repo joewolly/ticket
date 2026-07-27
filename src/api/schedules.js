@@ -174,6 +174,12 @@ function fire(db, schedule, today) {
 
 /** Walks forward by whole intervals until the date is in the future. */
 function advance(db, from, intervalDays, today) {
+  // Validation keeps this above zero, so reaching here means the row was
+  // corrupted or edited outside the API. Caught rather than looped over.
+  if (!(intervalDays >= 1)) {
+    throw new Error(`schedule interval must be at least 1 day, got ${intervalDays}`);
+  }
+
   const step = db.prepare(`SELECT date(?, ?) AS next`);
   let next = from;
 
