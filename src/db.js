@@ -73,6 +73,57 @@ const MIGRATIONS = [
 
   CREATE INDEX idx_sessions_expires ON sessions(expires_at);
   `,
+
+  `
+  -- Reference material for a ticket: the forum thread that explained the
+  -- error, the vendor RMA page, the runbook. Links rather than uploads, so
+  -- there is still exactly one file to back up.
+  CREATE TABLE ticket_links (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id  INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    url        TEXT    NOT NULL,
+    label      TEXT,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX idx_ticket_links_ticket ON ticket_links(ticket_id);
+
+  -- Recurring maintenance: the work you only remember once it has already gone
+  -- wrong. A schedule is a ticket template plus a cadence; the runner in
+  -- api/schedules.js turns it into real tickets as they come due.
+  CREATE TABLE schedules (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    title          TEXT    NOT NULL,
+    body           TEXT    NOT NULL DEFAULT '',
+    priority       TEXT    NOT NULL DEFAULT 'medium',
+    device_id      INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+    -- Tags are a template here, not a relation to query, so a normalized CSV
+    -- is enough and avoids a join table that nothing would ever read.
+    tags           TEXT    NOT NULL DEFAULT '',
+    interval_days  INTEGER NOT NULL,
+    lead_days      INTEGER NOT NULL DEFAULT 0,
+    next_due       TEXT    NOT NULL,
+    paused         INTEGER NOT NULL DEFAULT 0,
+    last_run_at    TEXT,
+    last_ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+    created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX idx_schedules_due ON schedules(paused, next_due);
+
+  -- Lets a generated ticket point back at what generated it. Nullable with a
+  -- NULL default, which is what makes adding a REFERENCES column by ALTER
+  -- legal while foreign keys are enforced.
+  ALTER TABLE tickets ADD COLUMN schedule_id INTEGER REFERENCES schedules(id) ON DELETE SET NULL;
+
+  CREATE INDEX idx_tickets_schedule ON tickets(schedule_id);
+
+  -- Marks a ticket as already reported overdue, so the daily sweep announces
+  -- each lapse once instead of every day until it is dealt with. Cleared when
+  -- the due date moves, so a deferred ticket is announced again if it lapses.
+  ALTER TABLE tickets ADD COLUMN overdue_notified_at TEXT;
+  `,
 ];
 
 /**
@@ -114,8 +165,21 @@ function migrate(db) {
   }
 }
 
-/** Runs `fn` inside a transaction, rolling back if it throws. */
+/** Names savepoints uniquely; a plain counter is enough since it never resets. */
+let savepointSeq = 0;
+
+/**
+ * Runs `fn` inside a transaction, rolling back if it throws.
+ *
+ * SQLite has no nested BEGIN, so a call made while a transaction is already
+ * open joins it through a savepoint rather than failing. That is what lets a
+ * composite operation — firing a schedule, which creates a ticket — compose
+ * out of pieces that each insist on their own atomicity, without either side
+ * having to know it is being wrapped.
+ */
 export function transaction(db, fn) {
+  if (db.isTransaction) return savepoint(db, fn);
+
   db.exec('BEGIN');
   try {
     const result = fn();
@@ -123,6 +187,22 @@ export function transaction(db, fn) {
     return result;
   } catch (err) {
     db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+function savepoint(db, fn) {
+  const name = `sp_${++savepointSeq}`;
+  db.exec(`SAVEPOINT ${name}`);
+  try {
+    const result = fn();
+    db.exec(`RELEASE ${name}`);
+    return result;
+  } catch (err) {
+    // ROLLBACK TO rewinds without discarding the savepoint, so it still has to
+    // be released or it would pin every later one beneath it.
+    db.exec(`ROLLBACK TO ${name}`);
+    db.exec(`RELEASE ${name}`);
     throw err;
   }
 }

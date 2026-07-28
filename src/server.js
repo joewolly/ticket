@@ -2,6 +2,11 @@ import http from 'node:http';
 import { openDatabase } from './db.js';
 import { serveStatic } from './static.js';
 import { ValidationError } from './validate.js';
+import { loadConfig } from './config.js';
+import { configureLogging, log, errorFields } from './log.js';
+import { createRateLimiter } from './ratelimit.js';
+import { createNotifier } from './notify.js';
+import { runBackupSafely } from './backup.js';
 import {
   listDevices,
   getDevice,
@@ -17,8 +22,20 @@ import {
   deleteTicket,
   addComment,
   deleteComment,
+  addLink,
+  deleteLink,
   listTags,
 } from './api/tickets.js';
+import {
+  listSchedules,
+  getSchedule,
+  createSchedule,
+  updateSchedule,
+  deleteSchedule,
+  runSchedules,
+} from './api/schedules.js';
+import { exportEntity } from './api/export.js';
+import { renderMetrics } from './api/metrics.js';
 import { getStats } from './api/stats.js';
 import {
   SESSION_COOKIE,
@@ -29,7 +46,6 @@ import {
   createSession,
   destroyAllSessions,
   destroySession,
-  loadAuthConfig,
   lockoutRemaining,
   parseCookies,
   purgeExpiredSessions,
@@ -42,11 +58,37 @@ import {
 const MAX_BODY_BYTES = 1024 * 1024;
 
 /**
+ * Sent on every response, including static files and redirects.
+ *
+ * 'unsafe-inline' is present for styles only: the UI sets CSS custom properties
+ * through style attributes to colour badges by status. Scripts stay under a
+ * strict 'self' — there is no inline script anywhere in the app, and keeping it
+ * that way is what makes the script directive worth having.
+ */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'same-origin',
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+  ].join('; '),
+};
+
+/**
  * Route table. Patterns use :name segments, matched in order of declaration.
- * Handlers receive ({ db, config, params, query, body, req, res }) and return a
- * JSON-serializable value, or undefined for 204. The optional fourth element
- * overrides the response status, which otherwise is 201 for POST and 200 for
- * everything else.
+ * Handlers receive ({ db, config, notifier, params, query, body, req, res }) and
+ * return a JSON-serializable value, or undefined for 204. A handler that writes
+ * to `res` itself (the export and metrics endpoints) is left alone. The optional
+ * fourth element overrides the response status, which otherwise is 201 for POST
+ * and 200 for everything else.
  */
 const ROUTES = [
   ['GET', '/api/health', () => ({ status: 'ok' })],
@@ -57,6 +99,9 @@ const ROUTES = [
 
   ['GET', '/api/stats', ({ db }) => getStats(db)],
   ['GET', '/api/tags', ({ db }) => listTags(db)],
+  ['GET', '/api/metrics', sendMetrics],
+  ['GET', '/api/export', sendExport],
+  ['POST', '/api/maintenance/run', runMaintenance, 200],
 
   ['GET', '/api/devices', ({ db, query }) => listDevices(db, query)],
   ['POST', '/api/devices', ({ db, body }) => createDevice(db, body)],
@@ -64,10 +109,16 @@ const ROUTES = [
   ['PATCH', '/api/devices/:id', ({ db, params, body }) => updateDevice(db, params.id, body)],
   ['DELETE', '/api/devices/:id', ({ db, params }) => deleteDevice(db, params.id)],
 
+  ['GET', '/api/schedules', ({ db, query }) => listSchedules(db, query)],
+  ['POST', '/api/schedules', ({ db, body }) => createSchedule(db, body)],
+  ['GET', '/api/schedules/:id', ({ db, params }) => getSchedule(db, params.id)],
+  ['PATCH', '/api/schedules/:id', ({ db, params, body }) => updateSchedule(db, params.id, body)],
+  ['DELETE', '/api/schedules/:id', ({ db, params }) => deleteSchedule(db, params.id)],
+
   ['GET', '/api/tickets', ({ db, query }) => listTickets(db, query)],
-  ['POST', '/api/tickets', ({ db, body }) => createTicket(db, body)],
+  ['POST', '/api/tickets', createTicketAndNotify],
   ['GET', '/api/tickets/:id', ({ db, params }) => getTicket(db, params.id)],
-  ['PATCH', '/api/tickets/:id', ({ db, params, body }) => updateTicket(db, params.id, body)],
+  ['PATCH', '/api/tickets/:id', updateTicketAndNotify],
   ['DELETE', '/api/tickets/:id', ({ db, params }) => deleteTicket(db, params.id)],
 
   ['POST', '/api/tickets/:id/comments', ({ db, params, body }) => addComment(db, params.id, body)],
@@ -76,6 +127,13 @@ const ROUTES = [
     '/api/tickets/:id/comments/:commentId',
     ({ db, params }) => deleteComment(db, params.id, params.commentId),
   ],
+
+  ['POST', '/api/tickets/:id/links', ({ db, params, body }) => addLink(db, params.id, body)],
+  [
+    'DELETE',
+    '/api/tickets/:id/links/:linkId',
+    ({ db, params }) => deleteLink(db, params.id, params.linkId),
+  ],
 ].map(([method, pattern, handler, status = method === 'POST' ? 201 : 200]) => ({
   method,
   handler,
@@ -83,12 +141,76 @@ const ROUTES = [
   ...compile(pattern),
 }));
 
+/* ---- Handlers that need more than the data layer ------------------------ */
+
+function createTicketAndNotify({ db, body, notifier }) {
+  const ticket = createTicket(db, body);
+  notifier.sendDetached('ticket.created', ticket);
+  return ticket;
+}
+
+function updateTicketAndNotify({ db, params, body, notifier }) {
+  const before = getTicket(db, params.id);
+  const ticket = updateTicket(db, params.id, body);
+
+  const closed = ['resolved', 'closed'];
+  if (!closed.includes(before.status) && closed.includes(ticket.status)) {
+    notifier.sendDetached('ticket.resolved', ticket);
+  }
+  return ticket;
+}
+
+/**
+ * Materializes due schedules and announces newly lapsed tickets. Exposed so an
+ * operator who would rather drive this from cron can set
+ * MAINTENANCE_INTERVAL_MINUTES=0 and post here instead.
+ */
+async function runMaintenance({ db, notifier }) {
+  const fired = runSchedules(db);
+  for (const { ticket } of fired) notifier.sendDetached('schedule.fired', ticket);
+
+  const overdue = await notifier.sweepOverdue(db);
+  purgeExpiredSessions(db);
+
+  return {
+    schedules_fired: fired.map(({ schedule_id, ticket }) => ({
+      schedule_id,
+      ticket_id: ticket.id,
+    })),
+    overdue_notified: overdue,
+  };
+}
+
+function sendExport({ db, query, res }) {
+  const { contentType, filename, body } = exportEntity(db, query);
+
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': Buffer.byteLength(body),
+    // The filename is generated from an enum and a date, so it needs no
+    // escaping, but quoting it keeps well-behaved clients predictable.
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+function sendMetrics({ db, res }) {
+  const body = renderMetrics(db);
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
 /* ---- Auth handlers ------------------------------------------------------ */
 
 function login({ db, config, body, req, res }) {
   if (!config.enabled) return { authenticated: true, enabled: false };
 
-  const key = clientKey(req);
+  const key = clientKey(req, config);
   const locked = lockoutRemaining(key);
   if (locked) {
     throw Object.assign(new Error(`Too many attempts. Try again in ${locked} seconds.`), {
@@ -98,12 +220,14 @@ function login({ db, config, body, req, res }) {
 
   if (!verifyPassword(config, body.password)) {
     recordFailure(key);
+    log.warn('failed login', { client: key });
     throw Object.assign(new Error('Incorrect password'), { status: 401 });
   }
 
   clearFailures(key);
   const { token, expiresAt } = createSession(db, config, req.headers['user-agent']);
   res.setHeader('Set-Cookie', sessionCookie(token, config, expiresAt));
+  log.info('signed in', { client: key });
   return { authenticated: true, enabled: true };
 }
 
@@ -183,15 +307,41 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(data),
+    // API responses carry the contents of a private tracker; keeping them out
+    // of any intermediate cache costs nothing on a LAN.
+    'Cache-Control': 'no-store',
   });
   res.end(data);
 }
 
 /** Builds the request handler against an already-open database. */
 export function createApp(db, config = { enabled: false }) {
+  const limiter = createRateLimiter(config.rateLimit);
+  const notifier = createNotifier(config);
+
   return async function handle(req, res) {
+    const startedAt = process.hrtime.bigint();
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
     const { pathname } = url;
+
+    for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
+      res.setHeader(header, value);
+    }
+
+    res.on('finish', () => {
+      const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const fields = {
+        method: req.method,
+        path: pathname,
+        status: res.statusCode,
+        ms: ms.toFixed(1),
+      };
+      // Ordinary traffic is debug-level so the default log stays a record of
+      // things that happened rather than a page-by-page access log.
+      if (res.statusCode >= 500) log.error('request failed', fields);
+      else if (res.statusCode >= 400) log.warn('request rejected', fields);
+      else log.debug('request', fields);
+    });
 
     // Nothing but the login page and its endpoint is reachable without a
     // session, so this gate runs before routing and before any file is read.
@@ -214,6 +364,16 @@ export function createApp(db, config = { enabled: false }) {
       return;
     }
 
+    // Applied to the API only: a page load pulls several static assets, and the
+    // work worth protecting is all behind these routes anyway.
+    const quota = limiter.check(clientKey(req, config));
+    if (!quota.allowed) {
+      res.setHeader('Retry-After', String(quota.retryAfter));
+      return sendJson(res, 429, {
+        error: `Rate limit exceeded. Retry in ${quota.retryAfter} seconds.`,
+      });
+    }
+
     const matched = match(req.method, pathname);
     if (!matched) return sendJson(res, 404, { error: `No route for ${pathname}` });
     if (matched.methodNotAllowed) {
@@ -225,6 +385,7 @@ export function createApp(db, config = { enabled: false }) {
       const result = await matched.route.handler({
         db,
         config,
+        notifier,
         params: matched.params,
         query: Object.fromEntries(url.searchParams),
         body,
@@ -232,11 +393,17 @@ export function createApp(db, config = { enabled: false }) {
         res,
       });
 
+      // Export and metrics write their own non-JSON responses.
+      if (res.writableEnded || res.headersSent) return;
       if (result === undefined) return res.writeHead(204).end();
       sendJson(res, matched.route.status, result);
     } catch (err) {
       if (err.status) return sendJson(res, err.status, { error: err.message });
-      console.error(`${req.method} ${pathname} failed:`, err);
+      log.error('unhandled request error', {
+        method: req.method,
+        path: pathname,
+        ...errorFields(err),
+      });
       sendJson(res, 500, { error: 'Internal server error' });
     }
   };
@@ -244,6 +411,47 @@ export function createApp(db, config = { enabled: false }) {
 
 export function createServer(db, config) {
   return http.createServer(createApp(db, config));
+}
+
+/**
+ * Starts the periodic sweeps: due schedules, overdue notifications, expired
+ * sessions, and backups. Returns a stop function so the timers do not outlive
+ * the server. Each tick is wrapped so a failure never kills the interval.
+ */
+export function startMaintenance(db, config) {
+  const notifier = createNotifier(config);
+  const timers = [];
+
+  const tick = async () => {
+    try {
+      const fired = runSchedules(db);
+      for (const { ticket } of fired) await notifier.send('schedule.fired', ticket);
+      if (fired.length > 0) log.info('schedules fired', { count: fired.length });
+
+      const overdue = await notifier.sweepOverdue(db);
+      if (overdue.length > 0) log.info('overdue notified', { count: overdue.length });
+
+      purgeExpiredSessions(db);
+    } catch (err) {
+      log.error('maintenance tick failed', errorFields(err));
+    }
+  };
+
+  if (config.maintenanceMinutes > 0) {
+    void tick();
+    timers.push(setInterval(tick, config.maintenanceMinutes * 60_000));
+  }
+
+  if (config.backup?.enabled) {
+    void runBackupSafely(db, config.backup);
+    timers.push(
+      setInterval(() => void runBackupSafely(db, config.backup), config.backup.intervalHours * 3600_000),
+    );
+  }
+
+  // Timers must not be what keeps the process alive; the listening socket is.
+  for (const timer of timers) timer.unref();
+  return () => timers.forEach(clearInterval);
 }
 
 /** Entry point — only runs when this file is executed directly. */
@@ -254,27 +462,35 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   let config;
   try {
-    config = loadAuthConfig();
+    config = loadConfig();
   } catch (err) {
     console.error(`\nRefusing to start: ${err.message}\n`);
     process.exit(1);
   }
 
+  configureLogging(config.log);
+
   const db = openDatabase(dbPath);
   purgeExpiredSessions(db);
   const server = createServer(db, config);
+  const stopMaintenance = startMaintenance(db, config);
 
   server.listen(port, host, () => {
-    console.log(`homelab-ticket listening on http://${host}:${port} (db: ${dbPath})`);
-    console.log(
-      config.enabled
-        ? `auth: password${config.apiToken ? ' + API token' : ''}`
-        : 'auth: DISABLED — anyone who can reach this port has full access',
-    );
+    log.info('listening', {
+      url: `http://${host}:${port}`,
+      db: dbPath,
+      auth: config.enabled ? (config.apiToken ? 'password+token' : 'password') : 'DISABLED',
+      notify: config.notify.enabled ? config.notify.format : 'off',
+      backups: config.backup.enabled ? `every ${config.backup.intervalHours}h` : 'off',
+    });
+    if (!config.enabled) {
+      log.warn('authentication is disabled — anyone who can reach this port has full access');
+    }
   });
 
   const shutdown = (signal) => {
-    console.log(`\n${signal} received, shutting down.`);
+    log.info('shutting down', { signal });
+    stopMaintenance();
     server.close(() => {
       db.close();
       process.exit(0);

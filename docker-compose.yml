@@ -21,6 +21,22 @@ services:
       API_TOKEN: ${API_TOKEN:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-}
       SESSION_DAYS: ${SESSION_DAYS:-30}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+      PUBLIC_HEALTH: ${PUBLIC_HEALTH:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      NOTIFY_URL: ${NOTIFY_URL:-}
+      NOTIFY_FORMAT: ${NOTIFY_FORMAT:-}
+      NOTIFY_EVENTS: ${NOTIFY_EVENTS:-}
+      NOTIFY_MIN_PRIORITY: ${NOTIFY_MIN_PRIORITY:-}
+      NOTIFY_TIMEOUT_MS: ${NOTIFY_TIMEOUT_MS:-}
+      # Backups land on the same volume as the database by default. Point this
+      # at a second mount if you want them on different hardware.
+      BACKUP_DIR: ${BACKUP_DIR:-}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-}
+      BACKUP_KEEP: ${BACKUP_KEEP:-}
+      MAINTENANCE_INTERVAL_MINUTES: ${MAINTENANCE_INTERVAL_MINUTES:-}
 
 volumes:
   ticket-data:

@@ -100,6 +100,38 @@ function toast(message, isError = false) {
   toast.timer = setTimeout(() => { node.className = ''; }, 2600);
 }
 
+/**
+ * Timers owned by whichever view is on screen. render() clears them, so work
+ * scheduled by a page that has since been replaced cannot act on the new one.
+ */
+let viewTimers = [];
+
+function onView(timer) {
+  viewTimers.push(timer);
+  return timer;
+}
+
+function clearViewTimers() {
+  viewTimers.forEach(clearTimeout);
+  viewTimers = [];
+}
+
+/**
+ * A debounced search box. Tying the pending timer to the view matters: typing
+ * a query and immediately switching tabs used to bounce you back to the list
+ * you had just left, a quarter of a second later.
+ */
+function searchBox(placeholder, value, commit) {
+  const input = el('input', { class: 'search', type: 'search', placeholder, value: value ?? '' });
+
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = onView(setTimeout(() => commit(input.value.trim()), 250));
+  });
+  return input;
+}
+
 /** Wraps an async action so any API error surfaces as a toast, not a dead click. */
 function guard(fn) {
   return async (...args) => {
@@ -134,6 +166,29 @@ function relativeTime(value) {
 
 const isOverdue = (ticket) =>
   ticket.is_open && ticket.due_date && ticket.due_date < new Date().toISOString().slice(0, 10);
+
+/** Names the common intervals so a schedule reads as a habit, not a number. */
+function cadence(days) {
+  const named = {
+    1: 'daily', 7: 'weekly', 14: 'fortnightly', 30: 'monthly',
+    90: 'quarterly', 182: 'twice a year', 365: 'yearly',
+  };
+  return named[days] ?? `every ${days} days`;
+}
+
+function dueDescription(days) {
+  if (days === null || days === undefined) return '';
+  if (days < 0) return `overdue by ${-days} ${-days === 1 ? 'day' : 'days'}`;
+  if (days === 0) return 'due today';
+  if (days === 1) return 'due tomorrow';
+  return `due in ${days} days`;
+}
+
+/**
+ * The API only ever stores http(s) link targets, but anything rendered into an
+ * href gets checked again here — one bad row should not become a script.
+ */
+const safeHref = (url) => (/^https?:\/\//i.test(url ?? '') ? url : '#');
 
 /* ---- Modal -------------------------------------------------------------- */
 
@@ -336,17 +391,7 @@ async function renderTickets(view, query) {
     location.hash = `#/tickets${next.toString() ? `?${next}` : ''}`;
   };
 
-  const search = el('input', {
-    class: 'search',
-    type: 'search',
-    placeholder: 'Search title and description…',
-    value: query.q ?? '',
-  });
-  let debounce;
-  search.addEventListener('input', () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => update('q', search.value.trim()), 250);
-  });
+  const search = searchBox('Search title and description…', query.q, (q) => update('q', q));
 
   view.append(
     el(
@@ -356,7 +401,12 @@ async function renderTickets(view, query) {
         'div',
         {},
         el('h1', {}, 'Tickets'),
-        el('p', {}, `${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`),
+        el(
+          'p',
+          {},
+          `${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`,
+          exportLinks('tickets'),
+        ),
       ),
       el('button', { class: 'btn btn-primary', onclick: () => newTicketModal() }, 'New ticket'),
     ),
@@ -493,9 +543,67 @@ async function renderTicketDetail(view, id) {
             ticket.body || 'No description.',
           ),
         ),
+        linksCard(ticket, id),
         commentsCard(ticket, id),
       ),
       ticketSidebar(ticket, devices, patch, id),
+    ),
+  );
+}
+
+/** Reference material for a ticket: the thread that explained it, the runbook. */
+function linksCard(ticket, id) {
+  const url = el('input', { name: 'url', type: 'url', placeholder: 'https://…', required: true });
+  const label = el('input', { name: 'label', placeholder: 'Label (optional)' });
+
+  const submit = guard(async (event) => {
+    event.preventDefault();
+    if (!url.value.trim()) return;
+    await api(`/tickets/${id}/links`, {
+      method: 'POST',
+      body: { url: url.value.trim(), label: label.value.trim() || null },
+    });
+    render();
+  });
+
+  return el(
+    'section',
+    { class: 'card', style: 'margin-bottom: 16px' },
+    el('h2', {}, `Links (${ticket.links.length})`),
+    ticket.links.length === 0
+      ? el('p', { class: 'muted' }, 'No links yet.')
+      : el(
+          'ul',
+          { class: 'mini-list' },
+          ...ticket.links.map((link) =>
+            el(
+              'li',
+              {},
+              el(
+                'a',
+                { href: safeHref(link.url), target: '_blank', rel: 'noopener noreferrer' },
+                link.label || link.url,
+              ),
+              el(
+                'button',
+                {
+                  class: 'btn btn-ghost btn-sm delete',
+                  onclick: guard(async () => {
+                    await api(`/tickets/${id}/links/${link.id}`, { method: 'DELETE' });
+                    render();
+                  }),
+                },
+                'Remove',
+              ),
+            ),
+          ),
+        ),
+    el(
+      'form',
+      { onsubmit: submit, class: 'link-form' },
+      url,
+      label,
+      el('button', { class: 'btn btn-sm', type: 'submit' }, 'Add'),
     ),
   );
 }
@@ -594,6 +702,13 @@ function ticketSidebar(ticket, devices, patch, id) {
       el('div', {}, `Created ${relativeTime(ticket.created_at)}`),
       el('div', {}, `Updated ${relativeTime(ticket.updated_at)}`),
       ticket.resolved_at && el('div', {}, `Resolved ${relativeTime(ticket.resolved_at)}`),
+      ticket.schedule_id &&
+        el(
+          'div',
+          {},
+          'From ',
+          el('a', { href: `#/schedules/${ticket.schedule_id}` }, 'a maintenance schedule'),
+        ),
     ),
     el(
       'button',
@@ -698,17 +813,7 @@ async function renderDevices(view, query) {
     location.hash = `#/devices${next.toString() ? `?${next}` : ''}`;
   };
 
-  const search = el('input', {
-    class: 'search',
-    type: 'search',
-    placeholder: 'Search name, hostname, IP, location…',
-    value: query.q ?? '',
-  });
-  let debounce;
-  search.addEventListener('input', () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => update('q', search.value.trim()), 250);
-  });
+  const search = searchBox('Search name, hostname, IP, location…', query.q, (q) => update('q', q));
 
   view.append(
     el(
@@ -718,7 +823,12 @@ async function renderDevices(view, query) {
         'div',
         {},
         el('h1', {}, 'Devices'),
-        el('p', {}, `${devices.length} ${devices.length === 1 ? 'device' : 'devices'}`),
+        el(
+          'p',
+          {},
+          `${devices.length} ${devices.length === 1 ? 'device' : 'devices'}`,
+          exportLinks('devices'),
+        ),
       ),
       el('button', { class: 'btn btn-primary', onclick: () => deviceModal() }, 'Add device'),
     ),
@@ -960,6 +1070,467 @@ function deviceModal(device) {
   );
 }
 
+/* ---- Schedules ---------------------------------------------------------- */
+
+async function renderSchedules(view, query) {
+  const params = new URLSearchParams(query);
+  const [schedules, devices] = await Promise.all([
+    api(`/schedules?${params}`),
+    api('/devices'),
+  ]);
+
+  const update = (key, value) => {
+    const next = new URLSearchParams(query);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    location.hash = `#/schedules${next.toString() ? `?${next}` : ''}`;
+  };
+
+  const runDue = guard(async () => {
+    const result = await api('/maintenance/run', { method: 'POST' });
+    const count = result.schedules_fired.length;
+    toast(count === 0 ? 'Nothing due right now' : `Created ${count} ticket(s)`);
+    render();
+  });
+
+  view.append(
+    el(
+      'div',
+      { class: 'page-head' },
+      el(
+        'div',
+        {},
+        el('h1', {}, 'Schedules'),
+        el(
+          'p',
+          {},
+          `${schedules.length} ${schedules.length === 1 ? 'schedule' : 'schedules'}`,
+          exportLinks('schedules'),
+        ),
+      ),
+      el(
+        'div',
+        { style: 'display: flex; gap: 8px' },
+        el('button', { class: 'btn', onclick: runDue }, 'Run due now'),
+        el('button', { class: 'btn btn-primary', onclick: () => scheduleModal(null, devices) }, 'New schedule'),
+      ),
+    ),
+    el(
+      'div',
+      { class: 'filters' },
+      select(
+        'paused',
+        [['', 'All schedules'], ['false', 'Active'], ['true', 'Paused']],
+        query.paused,
+        (e) => update('paused', e.target.value),
+      ),
+      select(
+        'device_id',
+        [['', 'Any device'], ...devices.map((d) => [d.id, d.name])],
+        query.device_id,
+        (e) => update('device_id', e.target.value),
+      ),
+    ),
+    schedules.length === 0
+      ? el(
+          'div',
+          { class: 'empty-state' },
+          el('strong', {}, 'No schedules yet'),
+          'Filter changes, cert renewals, battery swaps — the work you only remember once it has already gone wrong.',
+        )
+      : el('div', { class: 'ticket-list' }, ...schedules.map((s) => scheduleRow(s, devices))),
+  );
+}
+
+function scheduleRow(schedule, devices) {
+  const overdue = !schedule.paused && schedule.due_in_days <= 0;
+
+  const toggle = guard(async (event) => {
+    event.stopPropagation();
+    await api(`/schedules/${schedule.id}`, {
+      method: 'PATCH',
+      body: { paused: !schedule.paused },
+    });
+    toast(schedule.paused ? 'Resumed' : 'Paused');
+    render();
+  });
+
+  return el(
+    'div',
+    {
+      class: `ticket-row${schedule.paused ? ' done' : ''}`,
+      style: `--prio: var(--${schedule.priority})`,
+      onclick: () => { location.hash = `#/schedules/${schedule.id}`; },
+    },
+    el(
+      'div',
+      { class: 'main' },
+      el('div', { class: 'title' }, schedule.title),
+      el(
+        'div',
+        { class: 'sub' },
+        el('span', { class: 'id' }, `#${schedule.id}`),
+        el('span', { class: 'badge plain' }, cadence(schedule.interval_days)),
+        priorityBadge(schedule.priority),
+        schedule.device_name && el('span', {}, `· ${schedule.device_name}`),
+        el(
+          'span',
+          { class: overdue ? 'overdue' : '' },
+          `· ${schedule.paused ? `paused, next ${schedule.next_due}` : dueDescription(schedule.due_in_days)}`,
+        ),
+        ...schedule.tags.map((tag) => el('span', { class: 'tag' }, tag)),
+      ),
+    ),
+    el(
+      'button',
+      { class: 'btn btn-ghost btn-sm', onclick: toggle },
+      schedule.paused ? 'Resume' : 'Pause',
+    ),
+  );
+}
+
+async function renderScheduleDetail(view, id) {
+  const [schedule, devices] = await Promise.all([api(`/schedules/${id}`), api('/devices')]);
+
+  const rows = [
+    ['Cadence', cadence(schedule.interval_days)],
+    ['Next due', schedule.next_due],
+    ['Status', schedule.paused ? 'Paused' : dueDescription(schedule.due_in_days)],
+    ['Opens early', schedule.lead_days > 0 ? `${schedule.lead_days} days ahead` : 'on the due date'],
+    ['Device', schedule.device_name],
+    ['Priority', label(schedule.priority)],
+    ['Last run', schedule.last_run_at ? relativeTime(schedule.last_run_at) : 'never'],
+  ].filter(([, value]) => value);
+
+  view.append(
+    el('a', { class: 'back-link', href: '#/schedules' }, '← All schedules'),
+    el(
+      'div',
+      { class: 'detail-grid' },
+      el(
+        'div',
+        {},
+        el(
+          'div',
+          { class: 'detail-head row-between' },
+          el('h1', {}, schedule.title),
+          el(
+            'div',
+            { style: 'display: flex; gap: 8px' },
+            el(
+              'button',
+              { class: 'btn btn-sm', onclick: () => scheduleModal(schedule, devices) },
+              'Edit',
+            ),
+          ),
+        ),
+        el(
+          'section',
+          { class: 'card', style: 'margin-bottom: 16px' },
+          el('h2', {}, 'Ticket template'),
+          el(
+            'div',
+            { class: schedule.body ? 'prose' : 'prose empty' },
+            schedule.body || 'No description.',
+          ),
+          schedule.tags.length > 0 &&
+            el('div', { class: 'badges', style: 'margin-top: 10px' },
+              ...schedule.tags.map((tag) => el('span', { class: 'tag' }, tag))),
+        ),
+        el(
+          'section',
+          { class: 'card' },
+          el('h2', {}, `Tickets generated (${schedule.tickets.length})`),
+          schedule.tickets.length === 0
+            ? el('p', { class: 'muted' }, 'Nothing generated yet.')
+            : el(
+                'ul',
+                { class: 'mini-list' },
+                ...schedule.tickets.map((t) =>
+                  el(
+                    'li',
+                    {},
+                    el('a', { href: `#/tickets/${t.id}` }, t.title),
+                    el(
+                      'span',
+                      { class: 'meta' },
+                      `${label(t.status)} · due ${t.due_date}`,
+                    ),
+                  ),
+                ),
+              ),
+        ),
+      ),
+      el(
+        'aside',
+        { class: 'card' },
+        el('h2', {}, 'Details'),
+        el(
+          'dl',
+          { style: 'margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px' },
+          ...rows.flatMap(([key, value]) => [
+            el('dt', { class: 'muted' }, key),
+            el('dd', { style: 'margin: 0; overflow-wrap: anywhere' }, value),
+          ]),
+        ),
+        el(
+          'button',
+          {
+            class: 'btn btn-sm',
+            style: 'width: 100%; margin-top: 16px',
+            onclick: guard(async () => {
+              await api(`/schedules/${id}`, { method: 'PATCH', body: { paused: !schedule.paused } });
+              render();
+            }),
+          },
+          schedule.paused ? 'Resume schedule' : 'Pause schedule',
+        ),
+        el(
+          'button',
+          {
+            class: 'btn btn-danger btn-sm',
+            style: 'width: 100%; margin-top: 8px',
+            onclick: guard(async () => {
+              const warning = schedule.tickets.length
+                ? `Delete this schedule? Its ${schedule.tickets.length} ticket(s) are kept but unlinked.`
+                : 'Delete this schedule?';
+              if (!confirm(warning)) return;
+              await api(`/schedules/${id}`, { method: 'DELETE' });
+              toast('Schedule deleted');
+              location.hash = '#/schedules';
+            }),
+          },
+          'Delete schedule',
+        ),
+      ),
+    ),
+  );
+}
+
+function scheduleModal(schedule, devices) {
+  const editing = Boolean(schedule);
+
+  openModal(
+    editing ? `Edit schedule #${schedule.id}` : 'New schedule',
+    () =>
+      el(
+        'div',
+        {},
+        field(
+          'Title',
+          el('input', {
+            name: 'title',
+            required: true,
+            value: schedule?.title ?? '',
+            placeholder: 'Replace NAS dust filters',
+          }),
+        ),
+        field(
+          'Description',
+          el('textarea', { name: 'body', placeholder: 'What the job involves…' }, schedule?.body ?? ''),
+        ),
+        el(
+          'div',
+          { class: 'field-row' },
+          field(
+            'Every N days',
+            el('input', {
+              name: 'interval_days',
+              type: 'number',
+              min: 1,
+              max: 3650,
+              required: true,
+              value: schedule?.interval_days ?? 90,
+            }),
+          ),
+          field(
+            'Open this many days early',
+            el('input', {
+              name: 'lead_days',
+              type: 'number',
+              min: 0,
+              max: 365,
+              value: schedule?.lead_days ?? 0,
+            }),
+          ),
+        ),
+        el(
+          'div',
+          { class: 'field-row' },
+          field(
+            'Next due',
+            el('input', {
+              name: 'next_due',
+              type: 'date',
+              value: schedule?.next_due ?? new Date().toISOString().slice(0, 10),
+            }),
+          ),
+          field('Priority', select('priority', PRIORITIES, schedule?.priority ?? 'medium')),
+        ),
+        el(
+          'div',
+          { class: 'field-row' },
+          field(
+            'Device',
+            select(
+              'device_id',
+              [['', '— none —'], ...devices.map((d) => [d.id, d.name])],
+              schedule?.device_id ?? '',
+            ),
+          ),
+          field(
+            'Tags',
+            el('input', {
+              name: 'tags',
+              value: schedule?.tags.join(', ') ?? '',
+              placeholder: 'maintenance',
+            }),
+          ),
+        ),
+      ),
+    async (data) => {
+      const body = {
+        title: data.title,
+        body: data.body,
+        priority: data.priority,
+        device_id: data.device_id || null,
+        interval_days: Number(data.interval_days),
+        lead_days: Number(data.lead_days || 0),
+        next_due: data.next_due || null,
+        tags: parseTags(data.tags),
+      };
+
+      if (editing) {
+        await api(`/schedules/${schedule.id}`, { method: 'PATCH', body });
+        toast('Schedule updated');
+      } else {
+        const created = await api('/schedules', { method: 'POST', body });
+        toast(`Created schedule #${created.id}`);
+      }
+      render();
+    },
+  );
+}
+
+/* ---- Export ------------------------------------------------------------- */
+
+/** Plain links, so the browser downloads with the session cookie attached. */
+function exportLinks(entity) {
+  return el(
+    'span',
+    { class: 'export-links' },
+    '· export ',
+    el('a', { href: `/api/export?entity=${entity}&format=csv` }, 'CSV'),
+    ' ',
+    el('a', { href: `/api/export?entity=${entity}&format=json` }, 'JSON'),
+  );
+}
+
+/* ---- Keyboard ----------------------------------------------------------- */
+
+const SHORTCUTS = [
+  ['n', 'New ticket'],
+  ['/', 'Focus search'],
+  ['g then d', 'Go to dashboard'],
+  ['g then t', 'Go to tickets'],
+  ['g then v', 'Go to devices'],
+  ['g then s', 'Go to schedules'],
+  ['?', 'This help'],
+  ['Esc', 'Close dialog'],
+];
+
+const GO_TO = { d: '#/', t: '#/tickets', v: '#/devices', s: '#/schedules' };
+
+/** True while focus is somewhere that swallows plain keystrokes. */
+function isTyping() {
+  const active = document.activeElement;
+  return (
+    active?.isContentEditable ||
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(active?.tagName)
+  );
+}
+
+function showShortcuts() {
+  const root = document.getElementById('modal-root');
+  const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  const panel = el(
+    'div',
+    { class: 'modal' },
+    el('h2', {}, 'Keyboard shortcuts'),
+    el(
+      'dl',
+      { class: 'shortcut-list' },
+      ...SHORTCUTS.flatMap(([keys, description]) => [
+        el('dt', {}, ...keys.split(' then ').flatMap((key, i) => (i === 0 ? [el('kbd', {}, key)] : [' then ', el('kbd', {}, key)]))),
+        el('dd', {}, description),
+      ]),
+    ),
+    el(
+      'div',
+      { class: 'modal-actions' },
+      el('button', { type: 'button', class: 'btn btn-primary', onclick: close }, 'Close'),
+    ),
+  );
+
+  const backdrop = el('div', { class: 'modal-backdrop' }, panel);
+  backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', onKey);
+
+  root.innerHTML = '';
+  root.append(backdrop);
+}
+
+function installShortcuts() {
+  let awaitingGo = false;
+  let goTimer;
+
+  document.addEventListener('keydown', (event) => {
+    // Modifier combinations belong to the browser, and anything typed into a
+    // field is text rather than a command.
+    if (event.metaKey || event.ctrlKey || event.altKey || isTyping()) return;
+
+    if (awaitingGo) {
+      clearTimeout(goTimer);
+      awaitingGo = false;
+      const target = GO_TO[event.key];
+      if (target) {
+        event.preventDefault();
+        location.hash = target;
+      }
+      return;
+    }
+
+    switch (event.key) {
+      case 'g':
+        awaitingGo = true;
+        // A stranded 'g' should not silently capture the next keystroke.
+        goTimer = setTimeout(() => { awaitingGo = false; }, 1500);
+        break;
+      case 'n':
+        event.preventDefault();
+        newTicketModal();
+        break;
+      case '/': {
+        const search = document.querySelector('.search');
+        if (search) {
+          event.preventDefault();
+          search.focus();
+          search.select();
+        }
+        break;
+      }
+      case '?':
+        event.preventDefault();
+        showShortcuts();
+        break;
+      default:
+        break;
+    }
+  });
+}
+
 /* ---- Router ------------------------------------------------------------- */
 
 const ROUTES = [
@@ -968,9 +1539,12 @@ const ROUTES = [
   [/^\/tickets$/, renderTickets, 'tickets'],
   [/^\/devices\/(\d+)$/, renderDeviceDetail, 'devices'],
   [/^\/devices$/, renderDevices, 'devices'],
+  [/^\/schedules\/(\d+)$/, renderScheduleDetail, 'schedules'],
+  [/^\/schedules$/, renderSchedules, 'schedules'],
 ];
 
 async function render() {
+  clearViewTimers();
   const raw = location.hash.replace(/^#/, '') || '/';
   const [path, queryString = ''] = raw.split('?');
   const query = Object.fromEntries(new URLSearchParams(queryString));
@@ -1026,5 +1600,7 @@ async function initSession() {
 
 window.addEventListener('hashchange', render);
 document.getElementById('new-ticket').addEventListener('click', () => newTicketModal());
+document.getElementById('shortcuts').addEventListener('click', showShortcuts);
+installShortcuts();
 initSession();
 render();

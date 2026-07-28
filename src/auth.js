@@ -1,4 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { integer, truthy } from './env.js';
 
 export const SESSION_COOKIE = 'homelab_session';
 
@@ -12,7 +13,8 @@ const DEFAULT_SESSION_DAYS = 30;
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 
-const truthy = (value) => /^(1|true|yes|on)$/i.test(value ?? '');
+/** Ceiling on tracked addresses, so the failure map cannot grow without bound. */
+const MAX_TRACKED_CLIENTS = 10_000;
 
 /**
  * Reads auth settings from the environment, refusing to start in an unsafe
@@ -55,7 +57,9 @@ export function loadAuthConfig(env = process.env) {
     password,
     apiToken,
     cookieSecure: truthy(env.COOKIE_SECURE),
-    sessionDays: Number(env.SESSION_DAYS ?? DEFAULT_SESSION_DAYS),
+    // Validated rather than coerced: a typo used to become NaN here and only
+    // surface as a crash when someone tried to sign in.
+    sessionDays: integer(env, 'SESSION_DAYS', DEFAULT_SESSION_DAYS, { min: 1, max: 3650 }),
   };
 }
 
@@ -130,6 +134,23 @@ export function recordFailure(key) {
   entry.count += 1;
   entry.until = Date.now() + LOCKOUT_MS;
   failures.set(key, entry);
+  if (failures.size > MAX_TRACKED_CLIENTS) sweepFailures();
+}
+
+/**
+ * Drops lapsed lockouts, then the oldest entries if the map is still oversized.
+ * Evicting an active lockout only ever gives that address more attempts, so
+ * bounding memory here cannot lock a legitimate user out for longer.
+ */
+function sweepFailures() {
+  const now = Date.now();
+  for (const [key, entry] of failures) {
+    if (entry.until <= now) failures.delete(key);
+  }
+  for (const key of failures.keys()) {
+    if (failures.size <= MAX_TRACKED_CLIENTS) break;
+    failures.delete(key);
+  }
 }
 
 export function clearFailures(key) {
@@ -210,13 +231,30 @@ export const isPublicPath = (pathname) => PUBLIC_PATHS.has(pathname);
 export function authorize(db, config, req, pathname) {
   if (!config.enabled) return null;
   if (isPublicPath(pathname)) return null;
+  // Container orchestrators and uptime monitors cannot hold a session, so the
+  // health check can be opened up deliberately. It reports liveness only.
+  if (config.publicHealth && pathname === '/api/health') return null;
   if (verifyApiToken(config, req)) return null;
 
   const { [SESSION_COOKIE]: token } = parseCookies(req.headers.cookie);
   return sessionIsValid(db, token) ? null : 'unauthenticated';
 }
 
-/** Best-effort client address for throttling. */
-export function clientKey(req) {
+/**
+ * Best-effort client address for throttling and rate limiting.
+ *
+ * X-Forwarded-For is only consulted when the operator has said a proxy sits in
+ * front, because any client can send that header — trusting it unconditionally
+ * would let an attacker sidestep the login lockout by varying it. Ignoring it
+ * when a proxy *is* in front is just as wrong in the other direction: every
+ * request would share the proxy's address, so one attacker's failures would
+ * lock out everyone. Hence the explicit switch.
+ */
+export function clientKey(req, config = {}) {
+  if (config.trustProxy) {
+    const [first] = String(req.headers?.['x-forwarded-for'] ?? '').split(',');
+    const client = first?.trim();
+    if (client) return client;
+  }
   return req.socket?.remoteAddress ?? 'unknown';
 }
