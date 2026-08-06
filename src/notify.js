@@ -125,13 +125,17 @@ export function createNotifier(config = {}) {
       )
       .all({ days });
 
+    // The claim is conditional on the ticket still being unclaimed, so if an
+    // ad-hoc /api/maintenance/run overlaps the timer's sweep only one of them
+    // wins the row and the ticket is announced exactly once.
     const mark = db.prepare(
-      `UPDATE tickets SET due_soon_notified_at = datetime('now') WHERE id = ?`,
+      `UPDATE tickets SET due_soon_notified_at = datetime('now')
+        WHERE id = ? AND due_soon_notified_at IS NULL`,
     );
 
     const sent = [];
     for (const ticket of soon) {
-      mark.run(ticket.id);
+      if (mark.run(ticket.id).changes === 0) continue; // another sweep took it
       if (await send('ticket.due_soon', ticket)) sent.push(ticket.id);
     }
     return sent;
@@ -144,28 +148,40 @@ export function createNotifier(config = {}) {
    * that is briefly down catches up on the next tick rather than skipping a
    * whole week.
    */
-  async function maybeSendDigest(db, { now = new Date() } = {}) {
+  async function maybeSendDigest(db) {
     const cadence = settings.digest ?? 'off';
     if (!settings.enabled || cadence === 'off') return false;
 
-    const intervalDays = DIGEST_INTERVAL_DAYS[cadence];
-    const last = db.prepare(`SELECT value FROM meta WHERE key = 'digest_last_sent'`).get()?.value;
-    if (last) {
-      const elapsedDays = (now.getTime() - Date.parse(`${last.replace(' ', 'T')}Z`)) / 86400_000;
-      // A little slack so an hourly tick near the boundary is not pushed a full
-      // cycle later just for arriving a minute early.
-      if (elapsedDays < intervalDays - 1 / 24) return false;
-    }
+    // A little slack so an hourly tick arriving a minute early is not bumped a
+    // whole cycle later.
+    const threshold = DIGEST_INTERVAL_DAYS[cadence] - 1 / 24;
+    const previous =
+      db.prepare(`SELECT value FROM meta WHERE key = 'digest_last_sent'`).get()?.value ?? null;
+
+    // Claim the send atomically: stamp the timestamp only if the cadence is
+    // actually due. Two overlapping calls both try this, but SQLite serializes
+    // them and the second sees a fresh timestamp, so only one claim reports a
+    // changed row — the other backs off without sending a duplicate.
+    const claim = db
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES ('digest_last_sent', datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value = datetime('now')
+            WHERE julianday('now') - julianday(meta.value) >= :threshold`,
+      )
+      .run({ threshold });
+    if (claim.changes === 0) return false; // not due yet, or another call claimed it
 
     const summary = buildDigest(db);
     const request = settings.format === 'ntfy' ? ntfyDigest(summary) : jsonDigest(summary);
 
-    if (await deliver(request, { event: 'digest' })) {
-      db.prepare(
-        `INSERT INTO meta (key, value) VALUES ('digest_last_sent', datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      ).run();
-      return true;
+    if (await deliver(request, { event: 'digest' })) return true;
+
+    // Delivery failed: release the lease back to its old value so the next tick
+    // retries rather than skipping this whole cadence.
+    if (previous === null) {
+      db.prepare(`DELETE FROM meta WHERE key = 'digest_last_sent'`).run();
+    } else {
+      db.prepare(`UPDATE meta SET value = ? WHERE key = 'digest_last_sent'`).run(previous);
     }
     return false;
   }

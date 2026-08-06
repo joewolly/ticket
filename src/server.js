@@ -215,10 +215,24 @@ async function runMaintenance({ db, config, notifier }) {
 
 function uploadAttachment({ db, params, body, req }) {
   return addAttachment(db, params.id, {
-    filename: req.headers['x-filename'],
+    filename: decodeFilename(req.headers['x-filename']),
     contentType: req.headers['content-type'],
     data: body,
   });
+}
+
+/**
+ * The client percent-encodes the filename so a non-Latin-1 name survives the
+ * header. Decode it here; a malformed sequence falls back to the raw value
+ * rather than throwing, since cleanFilename will sanitize whatever it gets.
+ */
+function decodeFilename(value) {
+  if (!value) return value;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 /**
@@ -254,8 +268,8 @@ function sendExport({ db, query, res }) {
   res.end(body);
 }
 
-function sendMetrics({ db, res }) {
-  const body = renderMetrics(db);
+function sendMetrics({ db, config, res }) {
+  const body = renderMetrics(db, { warrantyDays: config.warrantyDays });
   res.writeHead(200, {
     'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),

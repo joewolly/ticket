@@ -24,7 +24,8 @@ npm run dev                                    # same, with auto-restart
 npm test                                       # 178 tests, no network needed
 ```
 
-Node 22.5+ is required (for the built-in `node:sqlite` module).
+Node 22.16+ is required — for the built-in `node:sqlite` module, and
+specifically for the FTS5 full-text search the ticket index relies on.
 
 ## What it does
 
@@ -78,7 +79,7 @@ calendar app you already use. A calendar app subscribes to a bare URL and can
 present neither a cookie nor a header, so the API token may ride in the query
 string **for this one read-only endpoint**:
 
-```
+```text
 https://tickets.example/api/calendar.ics?token=YOUR_API_TOKEN
 ```
 
@@ -121,7 +122,7 @@ advances to its next future occurrence.
 Schedules are swept hourly by default, along with the overdue check, the
 due-soon nudge, the digest, and the **warranty check** — which opens a single
 ticket when a non-retired device's warranty is within `WARRANTY_ALERT_DAYS` of
-lapsing, editing the date re-arming it. If you would rather drive all of that
+lapsing, and editing that warranty date re-arms the alert. If you would rather drive all of that
 from cron, set `MAINTENANCE_INTERVAL_MINUTES=0` and post to
 `/api/maintenance/run` yourself.
 

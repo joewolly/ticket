@@ -220,15 +220,28 @@ export function bulkUpdateTickets(db, input = {}) {
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new ValidationError('ids must be a non-empty array');
   }
-  if (ids.length > MAX_BULK) {
+
+  // Validate every id, then collapse duplicates so a repeated id is neither
+  // updated nor counted twice, and the batch limit reflects the real work.
+  const clean = [...new Set(ids.map((id) => requiredId(id, 'id')))];
+  if (clean.length > MAX_BULK) {
     throw new ValidationError(`Cannot update more than ${MAX_BULK} tickets at once`);
   }
 
-  const clean = ids.map((id) => requiredId(id, 'id'));
-  const { ids: _ignored, ...patch } = input;
+  const { ids: _ids, add_tags, ...patch } = input;
+  // add_tags merges onto each ticket's existing tags rather than replacing them,
+  // so one label can be pinned across a selection without flattening the rest —
+  // and it all rides the single transaction, so the batch stays atomic.
+  const addTags = add_tags === undefined ? null : tagList(add_tags, 'add_tags');
 
   return transaction(db, () => {
-    const updated = clean.map((id) => updateTicket(db, id, patch));
+    const updated = clean.map((id) => {
+      if (addTags && addTags.length > 0) {
+        const current = getTicket(db, id).tags;
+        return updateTicket(db, id, { ...patch, tags: [...new Set([...current, ...addTags])] });
+      }
+      return updateTicket(db, id, patch);
+    });
     return { updated: updated.length, tickets: updated };
   });
 }

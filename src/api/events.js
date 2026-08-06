@@ -6,18 +6,6 @@
  * foreign keys, so the log reads correctly even after a device is renamed.
  */
 
-/** Human-facing field names, used when a change is rendered as one line. */
-export const EVENT_LABELS = {
-  created: 'created the ticket',
-  status: 'status',
-  priority: 'priority',
-  device: 'device',
-  due_date: 'due date',
-  title: 'title',
-  tags: 'tags',
-  reopened: 'reopened the ticket',
-};
-
 /**
  * Appends one event. Called from within the same transaction as the change it
  * describes, so a rolled-back update never leaves a phantom line in the log.

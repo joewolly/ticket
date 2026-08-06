@@ -286,6 +286,8 @@ test('full-text search matches title, body, and comments', () => {
   assert.deepEqual(titles('fail'), ['disk failing'], 'prefix matching');
   assert.deepEqual(titles('smart errors'), ['disk failing'], 'all terms must match');
   assert.deepEqual(titles('nonesuch'), []);
+  // A term unique to the first ticket returns it and nothing else.
+  assert.deepEqual(titles('beeping'), ['UPS beeping']);
   assert.equal(a.id > 0, true);
 });
 
@@ -330,6 +332,29 @@ test('a bulk update rejects an empty or oversized id list', () => {
   const db = fresh();
   assert.throws(() => bulkUpdateTickets(db, { ids: [], status: 'closed' }), { status: 400 });
   assert.throws(() => bulkUpdateTickets(db, {}), { status: 400 });
+  // 501 distinct ids exceeds the 500 batch ceiling.
+  const tooMany = Array.from({ length: 501 }, (_, i) => i + 1);
+  assert.throws(() => bulkUpdateTickets(db, { ids: tooMany, status: 'closed' }), {
+    status: 400,
+    message: /more than 500/,
+  });
+});
+
+test('a bulk update collapses duplicate ids', () => {
+  const db = fresh();
+  const a = createTicket(db, { title: 'a' });
+  const result = bulkUpdateTickets(db, { ids: [a.id, a.id, a.id], status: 'closed' });
+  assert.equal(result.updated, 1, 'the same ticket is not counted three times');
+});
+
+test('bulk add_tags merges onto each ticket rather than replacing', () => {
+  const db = fresh();
+  const a = createTicket(db, { title: 'a', tags: ['disk'] });
+  const b = createTicket(db, { title: 'b', tags: ['network'] });
+
+  bulkUpdateTickets(db, { ids: [a.id, b.id], add_tags: ['urgent'] });
+  assert.deepEqual(getTicket(db, a.id).tags, ['disk', 'urgent']);
+  assert.deepEqual(getTicket(db, b.id).tags, ['network', 'urgent']);
 });
 
 test('a bulk update is all-or-nothing', () => {

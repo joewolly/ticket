@@ -69,6 +69,8 @@ export function deleteAttachment(db, ticketId, id) {
     .get(id, ticketId);
   if (!row) throw new NotFoundError(`No attachment with id ${id} on ticket ${ticketId}`);
   db.prepare('DELETE FROM attachments WHERE id = ?').run(id);
+  // Removing a file is activity on the ticket, the same as adding one.
+  db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(ticketId);
 }
 
 /** Whether a stored type may be shown inline (images) or must be downloaded. */

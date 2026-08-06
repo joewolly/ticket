@@ -14,14 +14,18 @@ import {
 
 const CLOSED_LIST = CLOSED_STATUSES.map((s) => `'${s}'`).join(', ');
 
+// The correlated count of a device's unresolved tickets, shared by the device
+// read and the dependents query so the two can never drift out of step.
+const OPEN_TICKETS = `(SELECT COUNT(*) FROM tickets t
+           WHERE t.device_id = d.id AND t.status NOT IN (${CLOSED_LIST}))`;
+
 // Every device read carries its open-ticket count, which is what makes the
 // inventory list actionable rather than just a spreadsheet, plus the name of
 // the device it depends on so the list can hint at the topology.
 const SELECT_DEVICE = `
   SELECT d.*,
          p.name AS parent_name,
-         (SELECT COUNT(*) FROM tickets t
-           WHERE t.device_id = d.id AND t.status NOT IN (${CLOSED_LIST})) AS open_tickets
+         ${OPEN_TICKETS} AS open_tickets
     FROM devices d
     LEFT JOIN devices p ON p.id = d.parent_id
 `;
@@ -60,9 +64,7 @@ export function getDevice(db, id) {
 
   const dependents = db
     .prepare(
-      `SELECT d.id, d.name, d.type, d.status,
-              (SELECT COUNT(*) FROM tickets t
-                WHERE t.device_id = d.id AND t.status NOT IN (${CLOSED_LIST})) AS open_tickets
+      `SELECT d.id, d.name, d.type, d.status, ${OPEN_TICKETS} AS open_tickets
          FROM devices d WHERE d.parent_id = ?
         ORDER BY d.name COLLATE NOCASE ASC`,
     )
@@ -168,7 +170,11 @@ function parseDevice(db, input, { partial, id = null }) {
  * parent; reaching the device being edited means the link would form a cycle.
  */
 function assertParentIsSafe(db, id, parentId) {
-  if (id !== null && parentId === id) {
+  // Compare as a number: a string id from a direct caller would slip a strict
+  // `===` self-check and let a device be made its own parent.
+  const self = id === null ? null : Number(id);
+
+  if (self !== null && parentId === self) {
     throw new ValidationError('A device cannot depend on itself');
   }
   if (!db.prepare('SELECT 1 FROM devices WHERE id = ?').get(parentId)) {
@@ -176,13 +182,16 @@ function assertParentIsSafe(db, id, parentId) {
   }
 
   const step = db.prepare('SELECT parent_id FROM devices WHERE id = ?');
+  const seen = new Set();
   let cursor = parentId;
-  // The set of devices is finite and each step climbs one link, so this ends;
-  // the guard against id closes the only loop a new edge could introduce.
   while (cursor !== null && cursor !== undefined) {
-    if (cursor === id) {
+    if (cursor === self) {
       throw new ValidationError('That parent would create a dependency loop');
     }
+    // A parent chain corrupted into a pre-existing cycle would otherwise loop
+    // forever; stop the first time a device is seen twice.
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
     cursor = step.get(cursor)?.parent_id ?? null;
   }
 }

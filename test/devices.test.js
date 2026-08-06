@@ -152,6 +152,8 @@ test('refuses a parent that is itself, missing, or would form a loop', () => {
   const b = createDevice(db, { name: 'b', parent_id: a.id });
 
   assert.throws(() => updateDevice(db, a.id, { parent_id: a.id }), { status: 400 });
+  // A string id must not slip the self-check through a loose comparison.
+  assert.throws(() => updateDevice(db, String(a.id), { parent_id: a.id }), { status: 400 });
   assert.throws(() => createDevice(db, { name: 'c', parent_id: 9999 }), { status: 400 });
   // a depends on b depends on a would be a cycle.
   assert.throws(() => updateDevice(db, a.id, { parent_id: b.id }), {

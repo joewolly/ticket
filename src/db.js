@@ -228,6 +228,19 @@ const MIGRATIONS = [
 
   CREATE INDEX idx_attachments_ticket ON attachments(ticket_id);
   `,
+
+  `
+  -- The insert/delete comment triggers keep the search index current, but an
+  -- edited comment body would leave stale text indexed. Nothing edits a comment
+  -- today, so this is defensive — but it is the missing third of the pair, and
+  -- cheap to have in place before any such feature lands.
+  CREATE TRIGGER comments_fts_au AFTER UPDATE ON comments BEGIN
+    UPDATE tickets_fts
+       SET comments = (SELECT coalesce(group_concat(body, ' '), '') FROM comments
+                        WHERE ticket_id = new.ticket_id)
+     WHERE rowid = new.ticket_id;
+  END;
+  `,
 ];
 
 /**

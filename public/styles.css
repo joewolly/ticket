@@ -653,7 +653,8 @@ kbd {
 }
 .attach-size { font-size: 11px; }
 .attachment .delete { opacity: 0; transition: opacity 0.12s; align-self: flex-end; }
-.attachment:hover .delete { opacity: 1; }
+.attachment:hover .delete,
+.attachment:focus-within .delete { opacity: 1; }
 
 /* ---- Bulk selection ----------------------------------------------------- */
 .row-select {

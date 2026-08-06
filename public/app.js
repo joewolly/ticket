@@ -609,14 +609,14 @@ function bulkList(tickets) {
   const addTag = guard(async () => {
     const tag = prompt('Tag to add to the selected tickets:');
     if (!tag || !tag.trim()) return;
-    // Tags replace wholesale, so merge onto each ticket's existing set.
-    const ids = [...selected];
-    for (const id of ids) {
-      const ticket = tickets.find((t) => t.id === id);
-      const next = [...new Set([...(ticket?.tags ?? []), tag.trim()])];
-      await api(`/tickets/${id}`, { method: 'PATCH', body: { tags: next } });
-    }
-    toast(`Tagged ${ids.length} ticket${ids.length === 1 ? '' : 's'}`);
+    // The server merges add_tags onto each ticket's own set inside one
+    // transaction, so the whole tagging is atomic and none of the existing
+    // tags are lost.
+    const result = await api('/tickets/bulk', {
+      method: 'POST',
+      body: { ids: [...selected], add_tags: [tag.trim()] },
+    });
+    toast(`Tagged ${result.updated} ticket${result.updated === 1 ? '' : 's'}`);
     render();
   });
 
@@ -883,7 +883,7 @@ function commentsCard(ticket, id) {
   return el(
     'section',
     { class: 'card' },
-    el('h2', {}, `Activity (${ticket.comments.length})`),
+    el('h2', {}, `Activity (${entries.length})`),
     ...entries.map(row),
     el(
       'form',
@@ -907,7 +907,12 @@ function attachmentsCard(ticket, id) {
     if (!file) return;
     const res = await fetch(`/api/tickets/${id}/attachments`, {
       method: 'POST',
-      headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': file.name },
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        // Header values are Latin-1; percent-encode so a name with accents or
+        // emoji survives the trip and is decoded server-side.
+        'X-Filename': encodeURIComponent(file.name),
+      },
       body: file,
     });
     if (!res.ok) {
@@ -1259,7 +1264,7 @@ async function renderDeviceDetail(view, id) {
           el('h2', {}, `Open tickets (${open.length})`),
           open.length === 0
             ? el('p', { class: 'muted' }, 'Nothing open against this device.')
-            : el('div', { class: 'ticket-list' }, ...open.map(ticketRow)),
+            : el('div', { class: 'ticket-list' }, ...open.map((t) => ticketRow(t))),
         ),
         el(
           'section',
