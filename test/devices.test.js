@@ -100,3 +100,73 @@ test('404s on a missing device', () => {
   assert.throws(() => getDevice(db, 999), { status: 404 });
   assert.throws(() => updateDevice(db, 999, { name: 'x' }), { status: 404 });
 });
+
+/* ---- Lifecycle fields ---------------------------------------------------- */
+
+test('stores serial, purchase, warranty, and rounded cost', () => {
+  const db = fresh();
+  const device = createDevice(db, {
+    name: 'nas-01',
+    serial_number: 'SN-42',
+    purchase_date: '2024-03-01',
+    warranty_expires: '2027-03-01',
+    cost: '899.999',
+  });
+
+  assert.equal(device.serial_number, 'SN-42');
+  assert.equal(device.purchase_date, '2024-03-01');
+  assert.equal(device.warranty_expires, '2027-03-01');
+  assert.equal(device.cost, 900, 'cost is rounded to cents');
+});
+
+test('rejects a malformed date or a negative cost', () => {
+  const db = fresh();
+  assert.throws(() => createDevice(db, { name: 'x', warranty_expires: 'soon' }), { status: 400 });
+  assert.throws(() => createDevice(db, { name: 'y', cost: -5 }), { status: 400 });
+});
+
+test('editing the warranty date re-arms its expiry alert', () => {
+  const db = fresh();
+  const device = createDevice(db, { name: 'nas-01', warranty_expires: '2027-01-01' });
+  db.prepare(`UPDATE devices SET warranty_notified_at = datetime('now') WHERE id = ?`).run(device.id);
+
+  updateDevice(db, device.id, { warranty_expires: '2028-01-01' });
+  const row = db.prepare('SELECT warranty_notified_at FROM devices WHERE id = ?').get(device.id);
+  assert.equal(row.warranty_notified_at, null, 'the flag clears so the new date can alert');
+});
+
+/* ---- Dependencies -------------------------------------------------------- */
+
+test('links a device to the one it depends on and lists dependents', () => {
+  const db = fresh();
+  const host = createDevice(db, { name: 'pve-01', type: 'server' });
+  const vm = createDevice(db, { name: 'vm-web', type: 'vm', parent_id: host.id });
+
+  assert.equal(vm.parent_name, 'pve-01');
+  assert.deepEqual(getDevice(db, host.id).dependents.map((d) => d.name), ['vm-web']);
+});
+
+test('refuses a parent that is itself, missing, or would form a loop', () => {
+  const db = fresh();
+  const a = createDevice(db, { name: 'a' });
+  const b = createDevice(db, { name: 'b', parent_id: a.id });
+
+  assert.throws(() => updateDevice(db, a.id, { parent_id: a.id }), { status: 400 });
+  assert.throws(() => createDevice(db, { name: 'c', parent_id: 9999 }), { status: 400 });
+  // a depends on b depends on a would be a cycle.
+  assert.throws(() => updateDevice(db, a.id, { parent_id: b.id }), {
+    status: 400,
+    message: /loop/,
+  });
+});
+
+test('deleting a parent orphans its dependents rather than cascading', () => {
+  const db = fresh();
+  const host = createDevice(db, { name: 'host' });
+  const vm = createDevice(db, { name: 'vm', parent_id: host.id });
+
+  deleteDevice(db, host.id);
+  const orphan = getDevice(db, vm.id);
+  assert.equal(orphan.parent_id, null);
+  assert.equal(orphan.parent_name, null);
+});

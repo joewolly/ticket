@@ -11,6 +11,7 @@ import {
   addComment,
   deleteComment,
   listTags,
+  bulkUpdateTickets,
 } from '../src/api/tickets.js';
 import { getStats } from '../src/api/stats.js';
 
@@ -223,4 +224,120 @@ test('404s on a missing ticket', () => {
   assert.throws(() => getTicket(db, 999), { status: 404 });
   assert.throws(() => updateTicket(db, 999, { title: 'x' }), { status: 404 });
   assert.throws(() => deleteTicket(db, 999), { status: 404 });
+});
+
+/* ---- Activity timeline --------------------------------------------------- */
+
+test('records an event when a ticket is created', () => {
+  const db = fresh();
+  const ticket = createTicket(db, { title: 'x' });
+  const { events } = getTicket(db, ticket.id);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, 'created');
+});
+
+test('logs a line for each field that actually moves', () => {
+  const db = fresh();
+  const device = createDevice(db, { name: 'nas-01' });
+  const ticket = createTicket(db, { title: 'x' });
+
+  updateTicket(db, ticket.id, { status: 'blocked', priority: 'high' });
+  updateTicket(db, ticket.id, { device_id: device.id });
+  updateTicket(db, ticket.id, { due_date: '2030-01-01' });
+  updateTicket(db, ticket.id, { tags: ['disk'] });
+  // A no-op update to an unchanged value records nothing.
+  updateTicket(db, ticket.id, { priority: 'high' });
+
+  const { events } = getTicket(db, ticket.id);
+  const kinds = events.map((e) => e.kind);
+  assert.deepEqual(kinds, ['created', 'status', 'priority', 'device', 'due_date', 'tags']);
+
+  const status = events.find((e) => e.kind === 'status');
+  assert.equal(status.from_value, 'open');
+  assert.equal(status.to_value, 'blocked');
+
+  const device_evt = events.find((e) => e.kind === 'device');
+  assert.equal(device_evt.to_value, 'nas-01', 'device events snapshot the name, not the id');
+});
+
+test('a rolled-back update leaves no event behind', () => {
+  const db = fresh();
+  const ticket = createTicket(db, { title: 'x' });
+  // A tag over the length ceiling fails after the field update line would run.
+  assert.throws(() => updateTicket(db, ticket.id, { status: 'blocked', tags: ['y'.repeat(60)] }), {
+    status: 400,
+  });
+  const { events, status } = getTicket(db, ticket.id);
+  assert.equal(status, 'open', 'the status change rolled back');
+  assert.equal(events.length, 1, 'only the creation event remains');
+});
+
+/* ---- Full-text search ---------------------------------------------------- */
+
+test('full-text search matches title, body, and comments', () => {
+  const db = fresh();
+  const a = createTicket(db, { title: 'UPS beeping', body: 'the battery reads low' });
+  const b = createTicket(db, { title: 'disk failing', body: 'smart errors' });
+  addComment(db, b.id, { body: 'swapped the PSU cable' });
+
+  const titles = (q) => listTickets(db, { q, status: 'all' }).map((t) => t.title).sort();
+  assert.deepEqual(titles('battery'), ['UPS beeping']);
+  assert.deepEqual(titles('psu'), ['disk failing'], 'a comment is searchable');
+  assert.deepEqual(titles('fail'), ['disk failing'], 'prefix matching');
+  assert.deepEqual(titles('smart errors'), ['disk failing'], 'all terms must match');
+  assert.deepEqual(titles('nonesuch'), []);
+  assert.equal(a.id > 0, true);
+});
+
+test('a search reduced to punctuation still runs as a literal match', () => {
+  const db = fresh();
+  createTicket(db, { title: 'C++ build broke' });
+  // No word characters survive tokenizing "+++", so the LIKE fallback carries it.
+  assert.deepEqual(listTickets(db, { q: '+++', status: 'all' }).map((t) => t.title), []);
+  assert.equal(listTickets(db, { q: 'build', status: 'all' }).length, 1);
+});
+
+test('search follows edits to the body and comments', () => {
+  const db = fresh();
+  const t = createTicket(db, { title: 'router', body: 'wifi drops' });
+  assert.equal(listTickets(db, { q: 'wifi', status: 'all' }).length, 1);
+
+  updateTicket(db, t.id, { body: 'replaced the antenna' });
+  assert.equal(listTickets(db, { q: 'wifi', status: 'all' }).length, 0, 'stale term gone');
+  assert.equal(listTickets(db, { q: 'antenna', status: 'all' }).length, 1);
+
+  const c = addComment(db, t.id, { body: 'firmware upgraded' });
+  assert.equal(listTickets(db, { q: 'firmware', status: 'all' }).length, 1);
+  deleteComment(db, t.id, c.id);
+  assert.equal(listTickets(db, { q: 'firmware', status: 'all' }).length, 0);
+});
+
+/* ---- Bulk updates -------------------------------------------------------- */
+
+test('applies one change across many tickets in a single transaction', () => {
+  const db = fresh();
+  const a = createTicket(db, { title: 'a' });
+  const b = createTicket(db, { title: 'b' });
+
+  const result = bulkUpdateTickets(db, { ids: [a.id, b.id], status: 'closed' });
+  assert.equal(result.updated, 2);
+  assert.ok(result.tickets.every((t) => t.status === 'closed'));
+  // Each ticket still records the transition, exactly as a single edit would.
+  assert.ok(getTicket(db, a.id).events.some((e) => e.kind === 'status'));
+});
+
+test('a bulk update rejects an empty or oversized id list', () => {
+  const db = fresh();
+  assert.throws(() => bulkUpdateTickets(db, { ids: [], status: 'closed' }), { status: 400 });
+  assert.throws(() => bulkUpdateTickets(db, {}), { status: 400 });
+});
+
+test('a bulk update is all-or-nothing', () => {
+  const db = fresh();
+  const a = createTicket(db, { title: 'a' });
+  // Second id does not exist, so the whole batch must roll back.
+  assert.throws(() => bulkUpdateTickets(db, { ids: [a.id, 9999], status: 'closed' }), {
+    status: 404,
+  });
+  assert.equal(getTicket(db, a.id).status, 'open', 'the first ticket was not left changed');
 });

@@ -564,3 +564,117 @@ kbd {
   .link-form { flex-wrap: wrap; }
   .link-form input { flex: 1 1 100%; }
 }
+
+/* ---- Markdown prose ----------------------------------------------------- */
+/* Rendered Markdown is real block elements, so the container no longer forces
+   whitespace; the tight margins keep it reading like a note, not an article. */
+.prose:has(p, ul, ol, pre, blockquote, h3, h4, h5) { white-space: normal; }
+.prose p { margin: 0 0 8px; }
+.prose p:last-child { margin-bottom: 0; }
+.prose h3, .prose h4, .prose h5 { margin: 12px 0 6px; line-height: 1.3; }
+.prose h3 { font-size: 16px; }
+.prose h4 { font-size: 14px; }
+.prose h5 { font-size: 13px; }
+.prose ul, .prose ol { margin: 0 0 8px; padding-left: 20px; }
+.prose li { margin: 2px 0; }
+.prose code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+.prose pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.prose pre code { background: none; border: none; padding: 0; }
+.prose blockquote {
+  margin: 0 0 8px;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+}
+.prose a { color: var(--accent); }
+
+/* ---- Activity timeline events ------------------------------------------- */
+.event {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.event-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+.event-text { flex: 1; overflow-wrap: anywhere; }
+.event-text strong { color: var(--text); }
+.event-when { flex: none; white-space: nowrap; font-size: 12px; }
+
+/* ---- Attachments -------------------------------------------------------- */
+.attach-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+.attachment {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+.attach-thumb {
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.attach-icon { font-size: 40px; line-height: 96px; }
+.attach-name {
+  font-size: 12.5px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+.attach-size { font-size: 11px; }
+.attachment .delete { opacity: 0; transition: opacity 0.12s; align-self: flex-end; }
+.attachment:hover .delete { opacity: 1; }
+
+/* ---- Bulk selection ----------------------------------------------------- */
+.row-select {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.bulk-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.bulk-count { font-size: 13px; font-weight: 600; margin-right: auto; }

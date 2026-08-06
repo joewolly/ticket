@@ -21,7 +21,7 @@ To run it directly instead:
 ```sh
 AUTH_PASSWORD=your-long-passphrase npm start   # http://localhost:8080
 npm run dev                                    # same, with auto-restart
-npm test                                       # 149 tests, no network needed
+npm test                                       # 178 tests, no network needed
 ```
 
 Node 22.5+ is required (for the built-in `node:sqlite` module).
@@ -29,15 +29,24 @@ Node 22.5+ is required (for the built-in `node:sqlite` module).
 ## What it does
 
 **Tickets** carry a status (`open`, `in_progress`, `blocked`, `resolved`,
-`closed`), a priority, optional tags, an optional due date, reference links, and
-a comment thread for notes as you work the problem. The default list view shows
-only what still needs attention, sorted most urgent first.
+`closed`), a priority, optional tags, an optional due date, reference links,
+file attachments, and a comment thread for notes as you work the problem. Every
+change is logged to an **activity timeline**, so a ticket that sat blocked for
+three weeks no longer looks the same as one fixed on the spot. Descriptions and
+notes render **Markdown**. The default list view shows only what still needs
+attention, sorted most urgent first, and lets you **select several at once** to
+close, resolve, or tag them in one go. A **full-text search** covers titles,
+descriptions, and every comment.
 
 **Devices** are the things you own — servers, NAS, switches, VMs, Pis. Each
 device shows its open tickets and its full service history, so "what have I
-done to this box before?" stays answerable. Deleting a device keeps its
-tickets and just unlinks them; the history of a machine you no longer own is
-usually the part worth keeping.
+done to this box before?" stays answerable. Alongside the network details it
+tracks the **lifecycle** fields you reach for when something breaks — serial
+number, purchase date, warranty expiry, cost — and warns you before a warranty
+lapses. Devices can **depend on** one another (a VM on its host, everything on
+a switch), so a device page answers "if I pull this, what goes with it?".
+Deleting a device keeps its tickets and just unlinks them; the history of a
+machine you no longer own is usually the part worth keeping.
 
 **Schedules** are recurring maintenance — dust filters, cert renewals, battery
 swaps, pool scrubs. A schedule is a ticket template plus a cadence, and it opens
@@ -49,6 +58,42 @@ in two weeks — the tickets you forgot rather than finished.
 
 Everything is also reachable by keyboard: `n` for a new ticket, `/` to search,
 `g` then `d`/`t`/`v`/`s` to move between pages, and `?` for the full list.
+
+## Attachments
+
+A ticket can carry files — a photo of the scorched capacitor, the RMA invoice,
+a saved log. They are stored as BLOBs inside the same SQLite file, on purpose:
+there is still exactly one thing to back up, and a snapshot captures the photo
+alongside the ticket that explains it. The type list is short (PNG, JPEG, GIF,
+WebP, PDF, plain text) and nothing a browser would run as markup is accepted,
+so serving a stored file back can never turn into stored script. Each upload is
+capped at 1 MB by the same limit that guards every request body.
+
+## Calendar feed
+
+`GET /api/calendar.ics` is an iCalendar feed of everything with a date on it —
+open tickets with a due date, and the next occurrence of each active schedule —
+so your homelab's deadlines show up next to the rest of life in whatever
+calendar app you already use. A calendar app subscribes to a bare URL and can
+present neither a cookie nor a header, so the API token may ride in the query
+string **for this one read-only endpoint**:
+
+```
+https://tickets.example/api/calendar.ics?token=YOUR_API_TOKEN
+```
+
+That is the only place a token is accepted in a URL; everywhere else still
+wants a header, because a token in a URL can end up in a log.
+
+## Reminders and digests
+
+Beyond the overdue alarm, a ticket can be nudged *before* it lapses. Add
+`ticket.due_soon` to `NOTIFY_EVENTS` and set `NOTIFY_REMINDER_DAYS`, and a
+ticket coming due within that window is announced once, re-arming if its due
+date moves. Set `NOTIFY_DIGEST=daily` or `weekly` for a rolled-up summary — how
+much is open, overdue, and stale, plus what is coming up this week — sent at
+most once per cadence, with the last-sent time kept in the database so it
+survives restarts.
 
 ## Recurring maintenance
 
@@ -73,9 +118,12 @@ disks" tickets would be noise. The single ticket keeps the date it was genuinely
 due, so the backlog is visible rather than hidden, and the schedule then
 advances to its next future occurrence.
 
-Schedules are swept hourly by default, along with the overdue check. If you
-would rather drive that from cron, set `MAINTENANCE_INTERVAL_MINUTES=0` and post
-to `/api/maintenance/run` yourself.
+Schedules are swept hourly by default, along with the overdue check, the
+due-soon nudge, the digest, and the **warranty check** — which opens a single
+ticket when a non-retired device's warranty is within `WARRANTY_ALERT_DAYS` of
+lapsing, editing the date re-arming it. If you would rather drive all of that
+from cron, set `MAINTENANCE_INTERVAL_MINUTES=0` and post to
+`/api/maintenance/run` yourself.
 
 ## Authentication
 
@@ -199,10 +247,13 @@ ignored.
 | `NOTIFY_EVENTS`                | created, overdue, fired | Which events to send                       |
 | `NOTIFY_MIN_PRIORITY`          | `low`               | Stay quiet below this priority                 |
 | `NOTIFY_TIMEOUT_MS`            | `5000`              | How long to wait on the webhook                |
+| `NOTIFY_REMINDER_DAYS`         | `3`                 | Days ahead to send the `ticket.due_soon` nudge |
+| `NOTIFY_DIGEST`                | `off`               | Rolled-up summary: `off`, `daily`, or `weekly` |
 | `BACKUP_DIR`                   | unset               | Enable scheduled backups by setting this       |
 | `BACKUP_INTERVAL_HOURS`        | `24`                | How often to snapshot                          |
 | `BACKUP_KEEP`                  | `7`                 | Snapshots to retain                            |
-| `MAINTENANCE_INTERVAL_MINUTES` | `60`                | Schedule and overdue sweep; `0` to use cron    |
+| `MAINTENANCE_INTERVAL_MINUTES` | `60`                | Schedule, overdue, and warranty sweep; `0` for cron |
+| `WARRANTY_ALERT_DAYS`          | `30`                | Days before warranty expiry to open a ticket; `0` off |
 | `PORT`                         | `8080`              | Port to listen on                              |
 | `HOST`                         | `0.0.0.0`           | Bind address                                   |
 | `DB_PATH`                      | `./data/homelab.db` | SQLite file (`/data/homelab.db` in Docker)     |
@@ -218,13 +269,17 @@ tickets too — useful for having a monitoring script open a ticket on failure.
 | `GET`    | `/api/stats`                     | Dashboard summary           |
 | `GET`    | `/api/tickets`                   | List / filter tickets       |
 | `POST`   | `/api/tickets`                   | Create a ticket             |
-| `GET`    | `/api/tickets/:id`               | One ticket, with comments and links |
+| `POST`   | `/api/tickets/bulk`              | Apply one change to many tickets |
+| `GET`    | `/api/tickets/:id`               | One ticket, with comments, links, attachments, and events |
 | `PATCH`  | `/api/tickets/:id`               | Update any subset of fields |
 | `DELETE` | `/api/tickets/:id`               | Delete a ticket             |
 | `POST`   | `/api/tickets/:id/comments`      | Add a note                  |
 | `DELETE` | `/api/tickets/:id/comments/:cid` | Delete a note               |
 | `POST`   | `/api/tickets/:id/links`         | Attach a reference URL      |
 | `DELETE` | `/api/tickets/:id/links/:lid`    | Remove a link               |
+| `POST`   | `/api/tickets/:id/attachments`   | Upload a file (raw body)    |
+| `DELETE` | `/api/tickets/:id/attachments/:aid` | Remove an attachment     |
+| `GET`    | `/api/attachments/:id`           | Download an attachment      |
 | `GET`    | `/api/devices`                   | List / filter devices       |
 | `POST`   | `/api/devices`                   | Register a device           |
 | `GET`    | `/api/devices/:id`               | One device                  |
@@ -238,6 +293,7 @@ tickets too — useful for having a monitoring script open a ticket on failure.
 | `POST`   | `/api/maintenance/run`           | Fire due schedules and sweep overdue |
 | `GET`    | `/api/tags`                      | Tags in use, with counts    |
 | `GET`    | `/api/export`                    | CSV or JSON dump            |
+| `GET`    | `/api/calendar.ics`              | iCalendar feed of due dates and schedules |
 | `GET`    | `/api/metrics`                   | Prometheus metrics          |
 | `POST`   | `/api/auth/login`                | Exchange the password for a session |
 | `POST`   | `/api/auth/logout`               | End this session (`{"everywhere":true}` ends all) |
@@ -249,8 +305,9 @@ API token; unauthenticated API calls get a `401`, and page requests redirect to
 `/login`.
 
 Ticket list filters: `status` (a specific status, or `all`; defaults to
-everything unresolved), `priority`, `device_id`, `tag`, `q` (text search), and
-`sort` (`priority`, `newest`, `oldest`, `updated`, `due`).
+everything unresolved), `priority`, `device_id`, `tag`, `q` (full-text search
+over title, description, and comments), and `sort` (`priority`, `newest`,
+`oldest`, `updated`, `due`).
 
 Schedule list filters: `paused` and `device_id`.
 
@@ -269,11 +326,12 @@ src/
   validate.js    Input validation and the domain enums
   log.js         Structured logging, text or JSON
   ratelimit.js   Per-client request limiter
-  notify.js      Webhook delivery and the overdue sweep
+  notify.js      Webhook delivery, the overdue/due-soon sweeps, and the digest
   backup.js      VACUUM INTO snapshots with retention
   static.js      Static file serving for the frontend
-  api/           devices.js, tickets.js, schedules.js, stats.js,
-                 export.js, metrics.js — the data layer
+  api/           devices.js, tickets.js, schedules.js, stats.js, events.js,
+                 warranty.js, attachments.js, calendar.js, export.js,
+                 metrics.js — the data layer
 public/          index.html, app.js, login.html, styles.css — dependency-free SPA
 test/            Unit tests per module plus HTTP integration tests
 ```

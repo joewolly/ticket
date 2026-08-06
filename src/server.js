@@ -7,6 +7,7 @@ import { configureLogging, log, errorFields } from './log.js';
 import { createRateLimiter } from './ratelimit.js';
 import { createNotifier } from './notify.js';
 import { runBackupSafely } from './backup.js';
+import { sweepWarranties } from './api/warranty.js';
 import {
   listDevices,
   getDevice,
@@ -25,6 +26,7 @@ import {
   addLink,
   deleteLink,
   listTags,
+  bulkUpdateTickets,
 } from './api/tickets.js';
 import {
   listSchedules,
@@ -36,7 +38,14 @@ import {
 } from './api/schedules.js';
 import { exportEntity } from './api/export.js';
 import { renderMetrics } from './api/metrics.js';
+import { renderCalendar } from './api/calendar.js';
 import { getStats } from './api/stats.js';
+import {
+  addAttachment,
+  getAttachment,
+  deleteAttachment,
+  isInline,
+} from './api/attachments.js';
 import {
   SESSION_COOKIE,
   authorize,
@@ -100,6 +109,7 @@ const ROUTES = [
   ['GET', '/api/stats', ({ db }) => getStats(db)],
   ['GET', '/api/tags', ({ db }) => listTags(db)],
   ['GET', '/api/metrics', sendMetrics],
+  ['GET', '/api/calendar.ics', sendCalendar],
   ['GET', '/api/export', sendExport],
   ['POST', '/api/maintenance/run', runMaintenance, 200],
 
@@ -116,6 +126,7 @@ const ROUTES = [
   ['DELETE', '/api/schedules/:id', ({ db, params }) => deleteSchedule(db, params.id)],
 
   ['GET', '/api/tickets', ({ db, query }) => listTickets(db, query)],
+  ['POST', '/api/tickets/bulk', ({ db, body }) => bulkUpdateTickets(db, body), 200],
   ['POST', '/api/tickets', createTicketAndNotify],
   ['GET', '/api/tickets/:id', ({ db, params }) => getTicket(db, params.id)],
   ['PATCH', '/api/tickets/:id', updateTicketAndNotify],
@@ -134,10 +145,21 @@ const ROUTES = [
     '/api/tickets/:id/links/:linkId',
     ({ db, params }) => deleteLink(db, params.id, params.linkId),
   ],
-].map(([method, pattern, handler, status = method === 'POST' ? 201 : 200]) => ({
+
+  // The upload reads raw bytes, not JSON: the file rides in the body, its name
+  // and type in headers. The `true` flag routes it past the JSON body parser.
+  ['POST', '/api/tickets/:id/attachments', uploadAttachment, 201, true],
+  ['GET', '/api/attachments/:id', sendAttachment],
+  [
+    'DELETE',
+    '/api/tickets/:id/attachments/:attachmentId',
+    ({ db, params }) => deleteAttachment(db, params.id, params.attachmentId),
+  ],
+].map(([method, pattern, handler, status = method === 'POST' ? 201 : 200, raw = false]) => ({
   method,
   handler,
   status,
+  raw,
   ...compile(pattern),
 }));
 
@@ -165,11 +187,16 @@ function updateTicketAndNotify({ db, params, body, notifier }) {
  * operator who would rather drive this from cron can set
  * MAINTENANCE_INTERVAL_MINUTES=0 and post here instead.
  */
-async function runMaintenance({ db, notifier }) {
+async function runMaintenance({ db, config, notifier }) {
   const fired = runSchedules(db);
   for (const { ticket } of fired) notifier.sendDetached('schedule.fired', ticket);
 
+  const warranties = sweepWarranties(db, { leadDays: config.warrantyDays });
+  for (const { ticket } of warranties) notifier.sendDetached('ticket.created', ticket);
+
   const overdue = await notifier.sweepOverdue(db);
+  const dueSoon = await notifier.sweepDueSoon(db);
+  await notifier.maybeSendDigest(db);
   purgeExpiredSessions(db);
 
   return {
@@ -177,8 +204,40 @@ async function runMaintenance({ db, notifier }) {
       schedule_id,
       ticket_id: ticket.id,
     })),
+    warranties_flagged: warranties.map(({ device_id, ticket }) => ({
+      device_id,
+      ticket_id: ticket.id,
+    })),
     overdue_notified: overdue,
+    due_soon_notified: dueSoon,
   };
+}
+
+function uploadAttachment({ db, params, body, req }) {
+  return addAttachment(db, params.id, {
+    filename: req.headers['x-filename'],
+    contentType: req.headers['content-type'],
+    data: body,
+  });
+}
+
+/**
+ * Streams a stored attachment back. Images are shown inline so the ticket view
+ * can render a thumbnail; everything else is a download. `nosniff` (set
+ * globally) plus the short type allowlist is what makes serving user bytes from
+ * our own origin safe.
+ */
+function sendAttachment({ db, params, res }) {
+  const file = getAttachment(db, params.id);
+  const disposition = isInline(file.content_type) ? 'inline' : 'attachment';
+
+  res.writeHead(200, {
+    'Content-Type': file.content_type,
+    'Content-Length': file.size,
+    'Content-Disposition': `${disposition}; filename="${file.filename.replace(/"/g, '')}"`,
+    'Cache-Control': 'no-store',
+  });
+  res.end(Buffer.from(file.data));
 }
 
 function sendExport({ db, query, res }) {
@@ -200,6 +259,17 @@ function sendMetrics({ db, res }) {
   res.writeHead(200, {
     'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+function sendCalendar({ db, res }) {
+  const body = renderCalendar(db);
+  res.writeHead(200, {
+    'Content-Type': 'text/calendar; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Content-Disposition': 'inline; filename="homelab.ics"',
     'Cache-Control': 'no-store',
   });
   res.end(body);
@@ -302,6 +372,26 @@ function readBody(req) {
   });
 }
 
+/** Buffers a raw request body (an uploaded file) under the same size ceiling. */
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new ValidationError('Request body is too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('error', reject);
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
 function sendJson(res, status, payload) {
   const data = JSON.stringify(payload);
   res.writeHead(status, {
@@ -381,7 +471,12 @@ export function createApp(db, config = { enabled: false }) {
     }
 
     try {
-      const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
+      const body =
+        req.method === 'GET' || req.method === 'DELETE'
+          ? {}
+          : matched.route.raw
+            ? await readRawBody(req)
+            : await readBody(req);
       const result = await matched.route.handler({
         db,
         config,
@@ -428,8 +523,17 @@ export function startMaintenance(db, config) {
       for (const { ticket } of fired) await notifier.send('schedule.fired', ticket);
       if (fired.length > 0) log.info('schedules fired', { count: fired.length });
 
+      const warranties = sweepWarranties(db, { leadDays: config.warrantyDays });
+      for (const { ticket } of warranties) await notifier.send('ticket.created', ticket);
+      if (warranties.length > 0) log.info('warranties flagged', { count: warranties.length });
+
       const overdue = await notifier.sweepOverdue(db);
       if (overdue.length > 0) log.info('overdue notified', { count: overdue.length });
+
+      const dueSoon = await notifier.sweepDueSoon(db);
+      if (dueSoon.length > 0) log.info('due-soon notified', { count: dueSoon.length });
+
+      if (await notifier.maybeSendDigest(db)) log.info('digest sent');
 
       purgeExpiredSessions(db);
     } catch (err) {

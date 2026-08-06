@@ -16,7 +16,8 @@ const COLUMNS = {
   ],
   devices: [
     'id', 'name', 'type', 'status', 'hostname', 'ip_address', 'os',
-    'location', 'open_tickets', 'created_at', 'notes',
+    'location', 'serial_number', 'purchase_date', 'warranty_expires', 'cost',
+    'depends_on', 'open_tickets', 'created_at', 'notes',
   ],
   schedules: [
     'id', 'title', 'priority', 'device', 'tags', 'interval_days', 'lead_days',
@@ -38,10 +39,13 @@ const QUERIES = {
 
   devices: `
     SELECT d.id, d.name, d.type, d.status, d.hostname, d.ip_address, d.os, d.location,
+           d.serial_number, d.purchase_date, d.warranty_expires, d.cost,
+           p.name AS depends_on,
            (SELECT COUNT(*) FROM tickets t
              WHERE t.device_id = d.id AND t.status NOT IN (${CLOSED_LIST})) AS open_tickets,
            d.created_at, d.notes
-      FROM devices d`,
+      FROM devices d
+      LEFT JOIN devices p ON p.id = d.parent_id`,
 
   schedules: `
     SELECT s.id, s.title, s.priority,

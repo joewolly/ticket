@@ -293,6 +293,117 @@ test('leaves resolved tickets out of the overdue sweep', async () => {
   }
 });
 
+test('nudges tickets whose due date is coming up, once each', async () => {
+  const capture = captureFetch();
+  try {
+    const notifier = createNotifier(
+      loadConfig({ ...notifyEnv, NOTIFY_EVENTS: 'ticket.due_soon', NOTIFY_REMINDER_DAYS: '3' }),
+    );
+    const soon = new Date(Date.now() + 2 * 86400_000).toISOString().slice(0, 10);
+    const far = new Date(Date.now() + 30 * 86400_000).toISOString().slice(0, 10);
+    createTicket(db, { title: 'Renew cert', due_date: soon });
+    createTicket(db, { title: 'Later', due_date: far });
+
+    assert.deepEqual((await notifier.sweepDueSoon(db)).length, 1);
+    assert.equal((await notifier.sweepDueSoon(db)).length, 0, 'second sweep stays quiet');
+    assert.equal(capture.calls.length, 1);
+  } finally {
+    capture.restore();
+  }
+});
+
+test('the due-soon sweep is silent unless its event is enabled', async () => {
+  const capture = captureFetch();
+  try {
+    const notifier = createNotifier(loadConfig(notifyEnv)); // default events omit due_soon
+    const soon = new Date(Date.now() + 1 * 86400_000).toISOString().slice(0, 10);
+    createTicket(db, { title: 'x', due_date: soon });
+
+    assert.equal((await notifier.sweepDueSoon(db)).length, 0);
+  } finally {
+    capture.restore();
+  }
+});
+
+test('sends a digest at most once per cadence', async () => {
+  const capture = captureFetch();
+  try {
+    const notifier = createNotifier(loadConfig({ ...notifyEnv, NOTIFY_DIGEST: 'weekly' }));
+    createTicket(db, { title: 'Open one' });
+
+    assert.equal(await notifier.maybeSendDigest(db), true);
+    assert.equal(await notifier.maybeSendDigest(db), false, 'still within the week');
+    assert.equal(capture.calls.length, 1);
+
+    const payload = JSON.parse(capture.calls[0].body);
+    assert.equal(payload.event, 'digest');
+    assert.equal(payload.open, 1);
+  } finally {
+    capture.restore();
+  }
+});
+
+test('the digest cadence advances once the interval has passed', async () => {
+  const capture = captureFetch();
+  try {
+    const notifier = createNotifier(loadConfig({ ...notifyEnv, NOTIFY_DIGEST: 'daily' }));
+    // Backdate the last send two days so the daily cadence is due again.
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES ('digest_last_sent', datetime('now', '-2 days'))`,
+    ).run();
+
+    assert.equal(await notifier.maybeSendDigest(db), true);
+  } finally {
+    capture.restore();
+  }
+});
+
+test('digest stays off by default', async () => {
+  const capture = captureFetch();
+  try {
+    const notifier = createNotifier(loadConfig(notifyEnv));
+    assert.equal(await notifier.maybeSendDigest(db), false);
+    assert.equal(capture.calls.length, 0);
+  } finally {
+    capture.restore();
+  }
+});
+
+/* ---- Warranty sweep ------------------------------------------------------ */
+
+test('opens one ticket for a device whose warranty is about to lapse', async () => {
+  const { createDevice } = await import('../src/api/devices.js');
+  const { sweepWarranties } = await import('../src/api/warranty.js');
+  const { listTickets } = await import('../src/api/tickets.js');
+
+  const soon = new Date(Date.now() + 10 * 86400_000).toISOString().slice(0, 10);
+  const far = new Date(Date.now() + 200 * 86400_000).toISOString().slice(0, 10);
+  createDevice(db, { name: 'switch-01', warranty_expires: soon });
+  createDevice(db, { name: 'nas-01', warranty_expires: far });
+
+  const opened = sweepWarranties(db, { leadDays: 30 });
+  assert.equal(opened.length, 1);
+  assert.match(opened[0].ticket.title, /switch-01/);
+  assert.deepEqual(opened[0].ticket.tags, ['warranty']);
+
+  // A second sweep does not open a duplicate.
+  assert.equal(sweepWarranties(db, { leadDays: 30 }).length, 0);
+  assert.equal(listTickets(db, { tag: 'warranty' }).length, 1);
+});
+
+test('the warranty sweep ignores retired devices and can be disabled', async () => {
+  const { createDevice } = await import('../src/api/devices.js');
+  const { sweepWarranties } = await import('../src/api/warranty.js');
+
+  const soon = new Date(Date.now() + 5 * 86400_000).toISOString().slice(0, 10);
+  createDevice(db, { name: 'old-box', status: 'retired', warranty_expires: soon });
+  createDevice(db, { name: 'live-box', warranty_expires: soon });
+
+  assert.equal(sweepWarranties(db, { leadDays: 0 }).length, 0, 'leadDays 0 disables it');
+  const opened = sweepWarranties(db, { leadDays: 30 });
+  assert.deepEqual(opened.map((o) => o.ticket.device_name), ['live-box']);
+});
+
 /* ---- Backups ------------------------------------------------------------- */
 
 test('writes a snapshot that opens as a database of its own', async () => {

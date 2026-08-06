@@ -70,5 +70,12 @@ export function renderMetrics(db) {
     ['', scalar('SELECT COUNT(*) FROM comments')],
   ]);
 
+  metric('homelab_warranties_expiring',
+    'Non-retired devices whose warranty lapses within 30 days.', 'gauge', [
+      ['', scalar(`SELECT COUNT(*) FROM devices
+                    WHERE status != 'retired' AND warranty_expires IS NOT NULL
+                      AND warranty_expires <= date('now', '+30 days')`)],
+    ]);
+
   return `${out.join('\n')}\n`;
 }
