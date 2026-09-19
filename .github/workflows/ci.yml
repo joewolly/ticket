@@ -180,13 +180,29 @@ jobs:
       - name: Verify persistence after container restart
         run: |
           docker restart ticket
+          for i in $(seq 1 30); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' ticket)
+            [ "$state" = "healthy" ] && break
+            [ "$state" = "unhealthy" ] && { docker logs ticket; exit 1; }
+            sleep 2
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' ticket)" = "healthy"
           docker exec -i ticket node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
-          import { openDatabase } from './src/db.js';
-          const db = openDatabase('/data/homelab.db');
-          assert.equal(db.prepare('SELECT queue FROM tickets WHERE title = ?').get('Docker restore proof').queue, 'inbox');
-          assert.equal(Buffer.from(db.prepare('SELECT data FROM attachments WHERE filename = ?').get('proof.txt').data).toString(), 'restore proof');
-          db.close();
+          const base = 'http://127.0.0.1:8080';
+          const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: process.env.AUTH_PASSWORD }) });
+          assert.equal(login.status, 200);
+          const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
+          const list = await fetch(`${base}/api/tickets?queue=inbox`, { headers });
+          assert.equal(list.status, 200);
+          const task = (await list.json()).find((task) => task.title === 'Docker restore proof');
+          assert.equal(task.queue, 'inbox');
+          const detail = await fetch(`${base}/api/tickets/${task.id}`, { headers });
+          assert.equal(detail.status, 200);
+          const attachment = (await detail.json()).attachments.find((file) => file.filename === 'proof.txt');
+          const download = await fetch(`${base}/api/attachments/${attachment.id}`, { headers });
+          assert.equal(download.status, 200);
+          assert.equal(await download.text(), 'restore proof');
           JS
 
       - name: Restore snapshot in an isolated container and data volume
