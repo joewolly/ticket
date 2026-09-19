@@ -91,6 +91,22 @@ test('the health check can be opened up for orchestrators that cannot log in', a
   });
 });
 
+test('the calendar feed accepts the API token in the query, but only there', async () => {
+  const withToken = { ...secured, apiToken: 'a-sixteen-char-tok' };
+  await withServer(withToken, async ({ request }) => {
+    // No credentials: refused like any other API path.
+    assert.equal((await request('GET', '/api/calendar.ics')).status, 401);
+    // Wrong token: still refused.
+    assert.equal((await request('GET', '/api/calendar.ics?token=nope')).status, 401);
+    // Correct token in the query: allowed, because a calendar app has no cookie.
+    const ok = await request('GET', '/api/calendar.ics?token=a-sixteen-char-tok');
+    assert.equal(ok.status, 200);
+    assert.match(ok.headers.get('content-type'), /text\/calendar/);
+    // The query-token door is scoped to the calendar alone.
+    assert.equal((await request('GET', '/api/tickets?token=a-sixteen-char-tok')).status, 401);
+  });
+});
+
 /* ---- Proxy awareness ----------------------------------------------------- */
 
 const failLogin = (request, forwardedFor) =>

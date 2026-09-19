@@ -1,4 +1,5 @@
 import { transaction } from '../db.js';
+import { recordEvent, recordChanges, listEvents } from './events.js';
 import {
   CLOSED_STATUSES,
   PRIORITIES,
@@ -11,6 +12,7 @@ import {
   optionalDate,
   optionalId,
   optionalText,
+  requiredId,
   requiredText,
   tagList,
 } from '../validate.js';
@@ -67,8 +69,18 @@ export function listTickets(db, query = {}) {
     params.tag = String(query.tag).trim().toLowerCase();
   }
   if (query.q) {
-    where.push('(t.title LIKE :q OR t.body LIKE :q)');
-    params.q = `%${query.q}%`;
+    // Full-text search covers the title, the body, and every comment, so
+    // "which ticket mentioned that PSU error?" is answerable. A query that
+    // reduces to no searchable words (all punctuation) falls back to a literal
+    // substring match rather than returning nothing.
+    const fts = toFtsQuery(query.q);
+    if (fts) {
+      where.push('t.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH :q)');
+      params.q = fts;
+    } else {
+      where.push('(t.title LIKE :q OR t.body LIKE :q)');
+      params.q = `%${query.q}%`;
+    }
   }
 
   const order = SORTS[query.sort] ?? SORTS.priority;
@@ -92,7 +104,14 @@ export function getTicket(db, id) {
     .prepare('SELECT * FROM ticket_links WHERE ticket_id = ? ORDER BY created_at ASC, id ASC')
     .all(id);
 
-  return { ...shapeTicket(row), comments, links };
+  const attachments = db
+    .prepare(
+      `SELECT id, filename, content_type, size, created_at FROM attachments
+        WHERE ticket_id = ? ORDER BY created_at ASC, id ASC`,
+    )
+    .all(id);
+
+  return { ...shapeTicket(row), comments, links, attachments, events: listEvents(db, id) };
 }
 
 /**
@@ -119,6 +138,7 @@ export function createTicket(db, input = {}, { scheduleId = null } = {}) {
 
     const id = Number(lastInsertRowid);
     setTags(db, id, tags);
+    recordEvent(db, id, 'created');
     return getTicket(db, id);
   });
 }
@@ -134,10 +154,11 @@ export function updateTicket(db, id, input = {}) {
   }
   if (fields.device_id) assertDeviceExists(db, fields.device_id);
 
-  // Moving the due date re-arms the overdue notification: a ticket deferred to
-  // next month should be announced again if it lapses again.
+  // Moving the due date re-arms both date alarms: a ticket deferred to next
+  // month should be nudged again as it nears, and announced again if it lapses.
   if (Object.hasOwn(fields, 'due_date') && fields.due_date !== existing.due_date) {
     fields.overdue_notified_at = null;
+    fields.due_soon_notified_at = null;
   }
 
   // Stamp resolved_at on the transition into a closed status, and clear it on
@@ -149,6 +170,12 @@ export function updateTicket(db, id, input = {}) {
     if (!isClosed && wasClosed) fields.resolved_at = null;
   }
 
+  // Resolve the incoming device_id to a name now, so the event log stores what
+  // the device was called at the time rather than a bare id.
+  const afterDeviceName = Object.hasOwn(fields, 'device_id')
+    ? deviceName(db, fields.device_id)
+    : existing.device_name;
+
   return transaction(db, () => {
     const keys = Object.keys(fields);
     if (keys.length > 0) {
@@ -157,7 +184,15 @@ export function updateTicket(db, id, input = {}) {
         `UPDATE tickets SET ${assignments}, updated_at = datetime('now') WHERE id = :id`,
       ).run({ ...fields, id });
     }
+
+    recordChanges(db, id, existing, fields, {
+      deviceNames: { before: existing.device_name, after: afterDeviceName },
+    });
+
     if (tags !== null) {
+      const before = existing.tags.join(', ');
+      const after = [...tags].sort().join(', ');
+      if (before !== after) recordEvent(db, id, 'tags', before || null, after || null);
       setTags(db, id, tags);
       db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(id);
     }
@@ -168,6 +203,47 @@ export function updateTicket(db, id, input = {}) {
 export function deleteTicket(db, id) {
   getTicket(db, id);
   db.prepare('DELETE FROM tickets WHERE id = ?').run(id);
+}
+
+/** Guards a bulk operation against a runaway request. */
+const MAX_BULK = 500;
+
+/**
+ * Applies the same change to many tickets at once — the "select the twelve I
+ * fixed this afternoon and close them all" move. The whole batch runs in one
+ * transaction, so either every ticket moves or none does, and each ticket still
+ * goes through updateTicket, so its event log and resolved_at bookkeeping are
+ * exactly what a one-at-a-time edit would have produced.
+ */
+export function bulkUpdateTickets(db, input = {}) {
+  const ids = input.ids;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new ValidationError('ids must be a non-empty array');
+  }
+
+  // Validate every id, then collapse duplicates so a repeated id is neither
+  // updated nor counted twice, and the batch limit reflects the real work.
+  const clean = [...new Set(ids.map((id) => requiredId(id, 'id')))];
+  if (clean.length > MAX_BULK) {
+    throw new ValidationError(`Cannot update more than ${MAX_BULK} tickets at once`);
+  }
+
+  const { ids: _ids, add_tags, ...patch } = input;
+  // add_tags merges onto each ticket's existing tags rather than replacing them,
+  // so one label can be pinned across a selection without flattening the rest —
+  // and it all rides the single transaction, so the batch stays atomic.
+  const addTags = add_tags === undefined ? null : tagList(add_tags, 'add_tags');
+
+  return transaction(db, () => {
+    const updated = clean.map((id) => {
+      if (addTags && addTags.length > 0) {
+        const current = getTicket(db, id).tags;
+        return updateTicket(db, id, { ...patch, tags: [...new Set([...current, ...addTags])] });
+      }
+      return updateTicket(db, id, patch);
+    });
+    return { updated: updated.length, tickets: updated };
+  });
 }
 
 export function addComment(db, ticketId, input = {}) {
@@ -264,6 +340,12 @@ function assertDeviceExists(db, deviceId) {
   if (!exists) throw new ValidationError(`No device with id ${deviceId}`);
 }
 
+/** The name of a device by id, or null — used to snapshot events readably. */
+function deviceName(db, deviceId) {
+  if (!deviceId) return null;
+  return db.prepare('SELECT name FROM devices WHERE id = ?').get(deviceId)?.name ?? null;
+}
+
 /** Turns the group_concat CSV into a real array for the client. */
 function shapeTicket({ tag_csv, ...ticket }) {
   return {
@@ -275,4 +357,17 @@ function shapeTicket({ tag_csv, ...ticket }) {
 
 function isoNow() {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
+}
+
+/**
+ * Turns free user text into a safe FTS5 MATCH expression. Each run of letters,
+ * digits, or underscores becomes a quoted prefix term ("disk"*), which means a
+ * partial word still matches and — crucially — the user's raw input never
+ * reaches the FTS5 parser, where a stray quote or operator would otherwise be a
+ * syntax error rather than a search. Returns '' when nothing searchable remains.
+ */
+function toFtsQuery(text) {
+  const terms = String(text).match(/[\p{L}\p{N}_]+/gu);
+  if (!terms) return '';
+  return terms.map((term) => `"${term}"*`).join(' ');
 }

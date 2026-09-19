@@ -234,3 +234,121 @@ test('rejects an unknown export entity with a 400, not a 500', async () => {
   const res = await fetch(`${base}/api/export?entity=sessions`);
   assert.equal(res.status, 400);
 });
+
+/* ---- Attachments --------------------------------------------------------- */
+
+// A one-pixel PNG header is enough to exercise the binary path.
+const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+
+test('uploads, serves, and deletes an attachment', async () => {
+  const ticket = await request('POST', '/api/tickets', { title: 'Has a photo' });
+  const id = ticket.body.id;
+
+  const up = await fetch(`${base}/api/tickets/${id}/attachments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-Filename': 'drive.png' },
+    body: PNG,
+  });
+  assert.equal(up.status, 201);
+  const meta = await up.json();
+  assert.equal(meta.filename, 'drive.png');
+  assert.equal(meta.size, PNG.length);
+
+  const withFile = await request('GET', `/api/tickets/${id}`);
+  assert.equal(withFile.body.attachments.length, 1);
+
+  const download = await fetch(`${base}/api/attachments/${meta.id}`);
+  assert.equal(download.status, 200);
+  assert.match(download.headers.get('content-type'), /image\/png/);
+  assert.match(download.headers.get('content-disposition'), /^inline/);
+  assert.equal(Buffer.from(await download.arrayBuffer()).equals(PNG), true);
+
+  assert.equal((await request('DELETE', `/api/tickets/${id}/attachments/${meta.id}`)).status, 204);
+  assert.equal((await request('GET', `/api/tickets/${id}`)).body.attachments.length, 0);
+});
+
+for (const [filename, contentType, disposition] of [
+  ['photo-café.png', 'image/png', 'inline'],
+  ['照片📷.png', 'image/png', 'inline'],
+  ["账单 (1)'*.pdf", 'application/pdf', 'attachment'],
+  ['100% done.txt', 'text/plain', 'attachment'],
+  ['quoted"name.txt', 'text/plain', 'attachment'],
+  ['control\u007fname.txt', 'text/plain', 'attachment'],
+]) {
+  test(`round-trips attachment filename ${JSON.stringify(filename)} over HTTP`, async () => {
+    const ticket = await request('POST', '/api/tickets', { title: 'Filename round trip' });
+    const up = await fetch(`${base}/api/tickets/${ticket.body.id}/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'X-Filename': encodeURIComponent(filename) },
+      body: PNG,
+    });
+    assert.equal(up.status, 201);
+    const meta = await up.json();
+    assert.equal(meta.filename, filename);
+
+    const download = await fetch(`${base}/api/attachments/${meta.id}`);
+    assert.equal(download.status, 200);
+    const header = download.headers.get('content-disposition');
+    assert.ok(header.startsWith(`${disposition}; `));
+    assert.match(header, /; filename="[\x20-\x21\x23-\x5b\x5d-\x7e]+";/);
+    const encoded = /; filename\*=UTF-8''([^;]+)$/.exec(header)?.[1];
+    assert.ok(encoded, 'the header includes a UTF-8 filename');
+    assert.doesNotMatch(encoded, /[^A-Za-z0-9!#$&+.^_`|~%\-]/);
+    assert.equal(decodeURIComponent(encoded), filename);
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), PNG);
+  });
+}
+
+test('rejects an attachment type that a browser might execute', async () => {
+  const ticket = await request('POST', '/api/tickets', { title: 'x' });
+  const res = await fetch(`${base}/api/tickets/${ticket.body.id}/attachments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html', 'X-Filename': 'x.html' },
+    body: Buffer.from('<script>alert(1)</script>'),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('strips path traversal from an uploaded filename', async () => {
+  const ticket = await request('POST', '/api/tickets', { title: 'x' });
+  const up = await fetch(`${base}/api/tickets/${ticket.body.id}/attachments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-Filename': '../../etc/passwd' },
+    body: PNG,
+  });
+  const meta = await up.json();
+  assert.doesNotMatch(meta.filename, /[/\\]|\.\./);
+});
+
+/* ---- Bulk updates -------------------------------------------------------- */
+
+test('closes several tickets in one request', async () => {
+  const a = await request('POST', '/api/tickets', { title: 'a' });
+  const b = await request('POST', '/api/tickets', { title: 'b' });
+
+  const res = await request('POST', '/api/tickets/bulk', {
+    ids: [a.body.id, b.body.id],
+    status: 'closed',
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.updated, 2);
+  assert.ok(res.body.tickets.every((t) => t.status === 'closed'));
+  assert.equal((await request('GET', `/api/tickets/${a.body.id}`)).body.status, 'closed');
+});
+
+/* ---- Calendar feed ------------------------------------------------------- */
+
+test('serves an iCalendar feed of due dates and schedules', async () => {
+  await request('POST', '/api/tickets', { title: 'Cert renewal', due_date: '2030-01-01' });
+  await request('POST', '/api/schedules', { title: 'Dust blow', interval_days: 90, next_due: '2030-02-01' });
+
+  const res = await fetch(`${base}/api/calendar.ics`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/calendar/);
+
+  const body = await res.text();
+  assert.match(body, /BEGIN:VCALENDAR/);
+  assert.match(body, /SUMMARY:\[medium\] Cert renewal/);
+  assert.match(body, /Dust blow/);
+  assert.match(body, /DTSTART;VALUE=DATE:20300101/);
+});

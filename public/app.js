@@ -190,6 +190,125 @@ function dueDescription(days) {
  */
 const safeHref = (url) => (/^https?:\/\//i.test(url ?? '') ? url : '#');
 
+/* ---- Markdown ----------------------------------------------------------- */
+
+/**
+ * A deliberately small Markdown renderer that builds DOM nodes directly. It
+ * never touches innerHTML with user text — every string goes in as a text node
+ * — so support for formatting costs nothing in safety. Links are held to the
+ * same http(s)-only rule as everywhere else. Unsupported syntax simply renders
+ * as the literal text the user typed, which is the right failure mode for notes.
+ */
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Fenced code block: everything up to the closing fence is verbatim.
+    if (/^```/.test(line)) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      frag.append(el('pre', {}, el('code', {}, buf.join('\n'))));
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const tag = `h${Math.min(6, heading[1].length + 2)}`; // # -> h3, keeps under card h2
+      frag.append(el(tag, {}, ...inlineNodes(heading[2])));
+      continue;
+    }
+
+    if (/^\s*([-*])\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*([-*])\s+/.test(lines[i])) {
+        items.push(el('li', {}, ...inlineNodes(lines[i].replace(/^\s*([-*])\s+/, ''))));
+        i++;
+      }
+      i--;
+      frag.append(el('ul', {}, ...items));
+      continue;
+    }
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        items.push(el('li', {}, ...inlineNodes(lines[i].replace(/^\s*\d+\.\s+/, ''))));
+        i++;
+      }
+      i--;
+      frag.append(el('ol', {}, ...items));
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      i--;
+      frag.append(el('blockquote', {}, ...inlineNodes(buf.join('\n'))));
+      continue;
+    }
+
+    if (line.trim() === '') continue;
+
+    // Otherwise a paragraph: gather following non-blank, non-structural lines.
+    const buf = [line];
+    while (
+      i + 1 < lines.length &&
+      lines[i + 1].trim() !== '' &&
+      !/^(```|#{1,6}\s|\s*[-*]\s|\s*\d+\.\s|\s*>\s?)/.test(lines[i + 1])
+    ) {
+      buf.push(lines[++i]);
+    }
+    frag.append(el('p', {}, ...inlineNodes(buf.join('\n'))));
+  }
+
+  return frag;
+}
+
+/** Inline spans: code, bold, italic, links, and bare URLs, as text/DOM nodes. */
+function inlineNodes(text) {
+  const pattern =
+    /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(_[^_]+_)|(\[[^\]]+\]\(https?:\/\/[^\s)]+\))|(https?:\/\/[^\s<]+)/g;
+  const nodes = [];
+  let last = 0;
+  let m;
+
+  const newline = (chunk) => {
+    // Preserve single newlines inside a paragraph as line breaks.
+    const parts = chunk.split('\n');
+    parts.forEach((part, idx) => {
+      if (idx > 0) nodes.push(el('br', {}));
+      if (part) nodes.push(document.createTextNode(part));
+    });
+  };
+
+  while ((m = pattern.exec(text))) {
+    if (m.index > last) newline(text.slice(last, m.index));
+    if (m[1]) nodes.push(el('code', {}, m[1].slice(1, -1)));
+    else if (m[2]) nodes.push(el('strong', {}, m[2].slice(2, -2)));
+    else if (m[3]) nodes.push(el('em', {}, m[3].slice(1, -1)));
+    else if (m[4]) nodes.push(el('em', {}, m[4].slice(1, -1)));
+    else if (m[5]) {
+      const [, label] = m[5].match(/^\[([^\]]+)\]/);
+      const [, url] = m[5].match(/\((https?:\/\/[^\s)]+)\)$/);
+      nodes.push(el('a', { href: safeHref(url), target: '_blank', rel: 'noopener noreferrer' }, label));
+    } else if (m[6]) {
+      nodes.push(el('a', { href: safeHref(m[6]), target: '_blank', rel: 'noopener noreferrer' }, m[6]));
+    }
+    last = pattern.lastIndex;
+  }
+  if (last < text.length) newline(text.slice(last));
+  return nodes;
+}
+
+/** A 'prose' block whose content is rendered from Markdown. */
+const prose = (text, extraClass = '') =>
+  el('div', { class: `prose${extraClass ? ` ${extraClass}` : ''}` }, renderMarkdown(text));
+
 /* ---- Modal -------------------------------------------------------------- */
 
 function openModal(title, buildBody, onSubmit) {
@@ -459,11 +578,82 @@ async function renderTickets(view, query) {
           el('strong', {}, 'No tickets match'),
           'Adjust the filters, or create a ticket.',
         )
-      : el('div', { class: 'ticket-list' }, ...tickets.map(ticketRow)),
+      : bulkList(tickets),
   );
 }
 
-function ticketRow(ticket) {
+/**
+ * The ticket list with a selection layer: tick a few rows and a bar appears to
+ * act on all of them at once — close them, resolve them, or tag them — which
+ * beats opening twelve tickets to do the same thing twelve times.
+ */
+function bulkList(tickets) {
+  const selected = new Set();
+
+  const bar = el('div', { class: 'bulk-bar', hidden: true });
+  const count = el('span', { class: 'bulk-count' });
+
+  const refresh = () => {
+    bar.hidden = selected.size === 0;
+    count.textContent = `${selected.size} selected`;
+  };
+
+  const apply = (patch, describe) =>
+    guard(async () => {
+      const ids = [...selected];
+      const result = await api('/tickets/bulk', { method: 'POST', body: { ids, ...patch } });
+      toast(`${describe} ${result.updated} ticket${result.updated === 1 ? '' : 's'}`);
+      render();
+    })();
+
+  const addTag = guard(async () => {
+    const tag = prompt('Tag to add to the selected tickets:');
+    if (!tag || !tag.trim()) return;
+    // The server merges add_tags onto each ticket's own set inside one
+    // transaction, so the whole tagging is atomic and none of the existing
+    // tags are lost.
+    const result = await api('/tickets/bulk', {
+      method: 'POST',
+      body: { ids: [...selected], add_tags: [tag.trim()] },
+    });
+    toast(`Tagged ${result.updated} ticket${result.updated === 1 ? '' : 's'}`);
+    render();
+  });
+
+  bar.append(
+    count,
+    el('button', { class: 'btn btn-sm', onclick: () => apply({ status: 'resolved' }, 'Resolved') }, 'Resolve'),
+    el('button', { class: 'btn btn-sm', onclick: () => apply({ status: 'closed' }, 'Closed') }, 'Close'),
+    el('button', { class: 'btn btn-sm', onclick: addTag }, 'Add tag…'),
+  );
+
+  const onToggle = (id, on) => {
+    if (on) selected.add(id);
+    else selected.delete(id);
+    refresh();
+  };
+
+  return el(
+    'div',
+    {},
+    bar,
+    el('div', { class: 'ticket-list' }, ...tickets.map((t) => ticketRow(t, onToggle))),
+  );
+}
+
+function ticketRow(ticket, onToggle) {
+  const checkbox =
+    onToggle &&
+    el('input', {
+      type: 'checkbox',
+      class: 'row-select',
+      title: 'Select',
+      onclick: (e) => {
+        e.stopPropagation();
+        onToggle(ticket.id, e.target.checked);
+      },
+    });
+
   return el(
     'div',
     {
@@ -471,6 +661,7 @@ function ticketRow(ticket) {
       style: `--prio: var(--${ticket.priority})`,
       onclick: () => { location.hash = `#/tickets/${ticket.id}`; },
     },
+    checkbox,
     el(
       'div',
       { class: 'main' },
@@ -537,13 +728,12 @@ async function renderTicketDetail(view, id) {
           'section',
           { class: 'card', style: 'margin-bottom: 16px' },
           el('h2', {}, 'Description'),
-          el(
-            'div',
-            { class: ticket.body ? 'prose' : 'prose empty' },
-            ticket.body || 'No description.',
-          ),
+          ticket.body
+            ? prose(ticket.body)
+            : el('div', { class: 'prose empty' }, 'No description.'),
         ),
         linksCard(ticket, id),
+        attachmentsCard(ticket, id),
         commentsCard(ticket, id),
       ),
       ticketSidebar(ticket, devices, patch, id),
@@ -608,6 +798,35 @@ function linksCard(ticket, id) {
   );
 }
 
+/** A one-line description of a recorded change, from its kind and values. */
+function eventLine(event) {
+  const from = event.from_value;
+  const to = event.to_value;
+  switch (event.kind) {
+    case 'created':
+      return 'opened the ticket';
+    case 'status':
+      return [`status → `, el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
+    case 'priority':
+      return [`priority → `, el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
+    case 'device':
+      return to ? `assigned to ${to}` : `unassigned${from ? ` from ${from}` : ''}`;
+    case 'due_date':
+      return to ? `due date set to ${to}` : 'due date cleared';
+    case 'title':
+      return 'renamed the ticket';
+    case 'tags':
+      return to ? `tags → ${to}` : 'tags cleared';
+    default:
+      return event.kind;
+  }
+}
+
+/**
+ * The activity timeline: recorded changes and typed notes, interleaved in the
+ * order they happened. The events answer "what did I do to this and when?"
+ * without anyone having had to write it down; the comments carry the detail.
+ */
 function commentsCard(ticket, id) {
   const input = el('textarea', {
     name: 'body',
@@ -624,33 +843,48 @@ function commentsCard(ticket, id) {
     render();
   });
 
+  // Merge the two streams and order by time; comments keep their delete control.
+  const entries = [
+    ...ticket.events.map((e) => ({ at: e.created_at, kind: 'event', data: e })),
+    ...ticket.comments.map((c) => ({ at: c.created_at, kind: 'comment', data: c })),
+  ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+
+  const row = (entry) =>
+    entry.kind === 'event'
+      ? el(
+          'div',
+          { class: 'event' },
+          el('span', { class: 'event-dot' }),
+          el('span', { class: 'event-text' }, ...[].concat(eventLine(entry.data))),
+          el('span', { class: 'event-when muted' }, relativeTime(entry.at)),
+        )
+      : el(
+          'div',
+          { class: 'comment' },
+          el(
+            'div',
+            { class: 'comment-head' },
+            el('span', {}, relativeTime(entry.at)),
+            el(
+              'button',
+              {
+                class: 'btn btn-ghost btn-sm delete',
+                onclick: guard(async () => {
+                  await api(`/tickets/${id}/comments/${entry.data.id}`, { method: 'DELETE' });
+                  render();
+                }),
+              },
+              'Delete',
+            ),
+          ),
+          prose(entry.data.body),
+        );
+
   return el(
     'section',
     { class: 'card' },
-    el('h2', {}, `Activity (${ticket.comments.length})`),
-    ...ticket.comments.map((comment) =>
-      el(
-        'div',
-        { class: 'comment' },
-        el(
-          'div',
-          { class: 'comment-head' },
-          el('span', {}, relativeTime(comment.created_at)),
-          el(
-            'button',
-            {
-              class: 'btn btn-ghost btn-sm delete',
-              onclick: guard(async () => {
-                await api(`/tickets/${id}/comments/${comment.id}`, { method: 'DELETE' });
-                render();
-              }),
-            },
-            'Delete',
-          ),
-        ),
-        el('div', { class: 'prose' }, comment.body),
-      ),
-    ),
+    el('h2', {}, `Activity (${entries.length})`),
+    ...entries.map(row),
     el(
       'form',
       { onsubmit: submit, style: 'margin-top: 12px' },
@@ -662,6 +896,83 @@ function commentsCard(ticket, id) {
       ),
     ),
   );
+}
+
+/** Attachments: photos of the fault, the invoice, a saved log. */
+function attachmentsCard(ticket, id) {
+  const fileInput = el('input', { type: 'file', style: 'display: none' });
+
+  const upload = guard(async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const res = await fetch(`/api/tickets/${id}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        // Header values are Latin-1; percent-encode so a name with accents or
+        // emoji survives the trip and is decoded server-side.
+        'X-Filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error ?? `Upload failed (${res.status})`);
+    }
+    render();
+  });
+
+  fileInput.addEventListener('change', upload);
+
+  const tile = (att) => {
+    const href = `/api/attachments/${att.id}`;
+    const preview = att.content_type.startsWith('image/')
+      ? el('img', { src: href, alt: att.filename, class: 'attach-thumb' })
+      : el('span', { class: 'attach-icon' }, att.content_type === 'application/pdf' ? '📄' : '📎');
+
+    return el(
+      'div',
+      { class: 'attachment' },
+      el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, preview),
+      el('a', { href, class: 'attach-name', target: '_blank', rel: 'noopener noreferrer' }, att.filename),
+      el('span', { class: 'attach-size muted' }, formatBytes(att.size)),
+      el(
+        'button',
+        {
+          class: 'btn btn-ghost btn-sm delete',
+          onclick: guard(async () => {
+            await api(`/tickets/${id}/attachments/${att.id}`, { method: 'DELETE' });
+            render();
+          }),
+        },
+        'Remove',
+      ),
+    );
+  };
+
+  return el(
+    'section',
+    { class: 'card', style: 'margin-bottom: 16px' },
+    el('h2', {}, `Attachments (${ticket.attachments.length})`),
+    ticket.attachments.length === 0
+      ? el('p', { class: 'muted' }, 'No attachments yet.')
+      : el('div', { class: 'attach-grid' }, ...ticket.attachments.map(tile)),
+    el(
+      'div',
+      { style: 'margin-top: 10px' },
+      fileInput,
+      el('button', { class: 'btn btn-sm', onclick: () => fileInput.click() }, 'Add file'),
+      el('span', { class: 'muted', style: 'margin-left: 8px; font-size: 12px' },
+        'images, PDF, or text · 1 MB max'),
+    ),
+  );
+}
+
+/** Human-readable byte size for an attachment. */
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ticketSidebar(ticket, devices, patch, id) {
@@ -916,6 +1227,10 @@ async function renderDeviceDetail(view, id) {
     ['IP address', device.ip_address],
     ['OS', device.os],
     ['Location', device.location],
+    ['Serial', device.serial_number],
+    ['Purchase date', device.purchase_date],
+    ['Warranty', device.warranty_expires],
+    ['Cost', device.cost != null ? device.cost : null],
     ['Added', device.created_at?.slice(0, 10)],
   ].filter(([, value]) => value);
 
@@ -942,13 +1257,14 @@ async function renderDeviceDetail(view, id) {
             el('button', { class: 'btn btn-sm', onclick: () => deviceModal(device) }, 'Edit'),
           ),
         ),
+        topologyCard(device),
         el(
           'section',
           { class: 'card', style: 'margin-bottom: 16px' },
           el('h2', {}, `Open tickets (${open.length})`),
           open.length === 0
             ? el('p', { class: 'muted' }, 'Nothing open against this device.')
-            : el('div', { class: 'ticket-list' }, ...open.map(ticketRow)),
+            : el('div', { class: 'ticket-list' }, ...open.map((t) => ticketRow(t))),
         ),
         el(
           'section',
@@ -991,7 +1307,7 @@ async function renderDeviceDetail(view, id) {
             'div',
             { style: 'margin-top: 14px' },
             el('label', {}, 'Notes'),
-            el('div', { class: 'prose', style: 'font-size: 13px' }, device.notes),
+            el('div', { class: 'prose', style: 'font-size: 13px' }, renderMarkdown(device.notes)),
           ),
         el(
           'button',
@@ -1015,8 +1331,55 @@ async function renderDeviceDetail(view, id) {
   );
 }
 
-function deviceModal(device) {
+/**
+ * What this device depends on, and what depends on it — the "if I pull this,
+ * what goes with it?" view. Shown only when there is a relationship to draw.
+ */
+function topologyCard(device) {
+  const dependents = device.dependents ?? [];
+  if (!device.parent_name && dependents.length === 0) return null;
+
+  return el(
+    'section',
+    { class: 'card', style: 'margin-bottom: 16px' },
+    el('h2', {}, 'Dependencies'),
+    device.parent_id &&
+      el(
+        'p',
+        { style: 'margin: 0 0 10px' },
+        'Depends on ',
+        el('a', { href: `#/devices/${device.parent_id}` }, device.parent_name),
+      ),
+    dependents.length > 0 &&
+      el(
+        'div',
+        {},
+        el('label', {}, `Used by ${dependents.length} device${dependents.length === 1 ? '' : 's'}`),
+        el(
+          'ul',
+          { class: 'mini-list' },
+          ...dependents.map((d) =>
+            el(
+              'li',
+              {},
+              el('a', { href: `#/devices/${d.id}` }, d.name),
+              el(
+                'span',
+                { class: d.open_tickets > 0 ? 'meta overdue' : 'meta' },
+                d.open_tickets > 0 ? `${d.open_tickets} open` : d.type,
+              ),
+            ),
+          ),
+        ),
+      ),
+  );
+}
+
+async function deviceModal(device) {
   const editing = Boolean(device);
+  // The parent picker needs the roster; exclude the device itself so it cannot
+  // be set as its own parent from the dropdown.
+  const devices = (await api('/devices').catch(() => [])).filter((d) => d.id !== device?.id);
 
   openModal(
     editing ? `Edit ${device.name}` : 'Add device',
@@ -1055,14 +1418,64 @@ function deviceModal(device) {
             el('input', { name: 'location', value: device?.location ?? '', placeholder: 'Rack, shelf 2' }),
           ),
         ),
+        el(
+          'div',
+          { class: 'field-row' },
+          field(
+            'Serial number',
+            el('input', { name: 'serial_number', value: device?.serial_number ?? '', placeholder: 'For the RMA' }),
+          ),
+          field(
+            'Cost',
+            el('input', {
+              name: 'cost',
+              type: 'number',
+              min: 0,
+              step: '0.01',
+              value: device?.cost ?? '',
+              placeholder: '0.00',
+            }),
+          ),
+        ),
+        el(
+          'div',
+          { class: 'field-row' },
+          field(
+            'Purchase date',
+            el('input', { name: 'purchase_date', type: 'date', value: device?.purchase_date ?? '' }),
+          ),
+          field(
+            'Warranty expires',
+            el('input', { name: 'warranty_expires', type: 'date', value: device?.warranty_expires ?? '' }),
+          ),
+        ),
+        field(
+          'Depends on',
+          select(
+            'parent_id',
+            [['', '— nothing —'], ...devices.map((d) => [d.id, d.name])],
+            device?.parent_id ?? '',
+          ),
+        ),
         field('Notes', el('textarea', { name: 'notes' }, device?.notes ?? '')),
       ),
     async (data) => {
+      // Empty optional fields come back as '' from the form; send null so they
+      // clear the column rather than failing date/number validation.
+      const body = {
+        ...data,
+        cost: data.cost === '' ? null : data.cost,
+        purchase_date: data.purchase_date || null,
+        warranty_expires: data.warranty_expires || null,
+        serial_number: data.serial_number || null,
+        parent_id: data.parent_id || null,
+      };
+
       if (editing) {
-        await api(`/devices/${device.id}`, { method: 'PATCH', body: data });
+        await api(`/devices/${device.id}`, { method: 'PATCH', body });
         toast('Device updated');
       } else {
-        const created = await api('/devices', { method: 'POST', body: data });
+        const created = await api('/devices', { method: 'POST', body });
         toast(`Added ${created.name}`);
       }
       render();
@@ -1106,6 +1519,7 @@ async function renderSchedules(view, query) {
           {},
           `${schedules.length} ${schedules.length === 1 ? 'schedule' : 'schedules'}`,
           exportLinks('schedules'),
+          calendarLink(),
         ),
       ),
       el(
@@ -1228,11 +1642,9 @@ async function renderScheduleDetail(view, id) {
           'section',
           { class: 'card', style: 'margin-bottom: 16px' },
           el('h2', {}, 'Ticket template'),
-          el(
-            'div',
-            { class: schedule.body ? 'prose' : 'prose empty' },
-            schedule.body || 'No description.',
-          ),
+          schedule.body
+            ? prose(schedule.body)
+            : el('div', { class: 'prose empty' }, 'No description.'),
           schedule.tags.length > 0 &&
             el('div', { class: 'badges', style: 'margin-top: 10px' },
               ...schedule.tags.map((tag) => el('span', { class: 'tag' }, tag))),
@@ -1423,6 +1835,20 @@ function exportLinks(entity) {
     el('a', { href: `/api/export?entity=${entity}&format=csv` }, 'CSV'),
     ' ',
     el('a', { href: `/api/export?entity=${entity}&format=json` }, 'JSON'),
+  );
+}
+
+/** Link to the iCalendar feed of due dates and maintenance. */
+function calendarLink() {
+  return el(
+    'span',
+    { class: 'export-links' },
+    '· ',
+    el(
+      'a',
+      { href: '/api/calendar.ics', title: 'Subscribe from a calendar app using ?token=API_TOKEN' },
+      'calendar feed',
+    ),
   );
 }
 

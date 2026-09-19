@@ -13,8 +13,11 @@ const STALE_AFTER_DAYS = 14;
  * cardinality bounded — a gauge per device name would quietly turn a ticket
  * tracker into a metrics problem.
  */
-export function renderMetrics(db) {
+export function renderMetrics(db, { warrantyDays = 30 } = {}) {
   const scalar = (sql) => Object.values(db.prepare(sql).get())[0];
+  // 0 means the sweep is disabled, not a zero-day window; show the default span
+  // so the gauge stays meaningful either way.
+  const warrantyWindow = warrantyDays > 0 ? warrantyDays : 30;
   const counts = (sql) => new Map(db.prepare(sql).all().map(({ key, count }) => [key, count]));
 
   const byPriority = counts(
@@ -69,6 +72,13 @@ export function renderMetrics(db) {
   metric('homelab_comments', 'Notes recorded across all tickets.', 'counter', [
     ['', scalar('SELECT COUNT(*) FROM comments')],
   ]);
+
+  metric('homelab_warranties_expiring',
+    `Non-retired devices with expired warranties or warranties that lapse within ${warrantyWindow} days.`, 'gauge', [
+      ['', scalar(`SELECT COUNT(*) FROM devices
+                    WHERE status != 'retired' AND warranty_expires IS NOT NULL
+                      AND warranty_expires <= date('now', '+${warrantyWindow} days')`)],
+    ]);
 
   return `${out.join('\n')}\n`;
 }

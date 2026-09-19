@@ -8,10 +8,14 @@ export const NOTIFY_EVENTS = [
   'ticket.created',
   'ticket.resolved',
   'ticket.overdue',
+  'ticket.due_soon',
   'schedule.fired',
 ];
 
 const DEFAULT_NOTIFY_EVENTS = ['ticket.created', 'ticket.overdue', 'schedule.fired'];
+
+/** How often a rolled-up summary is sent, if at all. */
+export const DIGEST_CADENCES = ['off', 'daily', 'weekly'];
 
 /**
  * The whole runtime configuration, read once at startup. Everything beyond
@@ -50,6 +54,11 @@ export function loadConfig(env = process.env) {
       events: new Set(list(env, 'NOTIFY_EVENTS', NOTIFY_EVENTS, DEFAULT_NOTIFY_EVENTS)),
       minPriority: choice(env, 'NOTIFY_MIN_PRIORITY', PRIORITIES, 'low'),
       timeoutMs: integer(env, 'NOTIFY_TIMEOUT_MS', 5000, { min: 100, max: 60_000 }),
+      // How many days ahead of a due date to send the 'ticket.due_soon' nudge.
+      // Only consulted when that event is enabled; 0 turns the look-ahead off.
+      reminderDays: integer(env, 'NOTIFY_REMINDER_DAYS', 3, { min: 0, max: 365 }),
+      // A rolled-up summary of the backlog, sent at most once per cadence.
+      digest: choice(env, 'NOTIFY_DIGEST', DIGEST_CADENCES, 'off'),
     },
 
     backup: {
@@ -62,5 +71,9 @@ export function loadConfig(env = process.env) {
     // How often schedules are materialized and overdue tickets swept. 0 turns
     // the timer off for anyone who would rather drive it from cron.
     maintenanceMinutes: integer(env, 'MAINTENANCE_INTERVAL_MINUTES', 60, { max: 10_080 }),
+
+    // How many days before a device's warranty lapses to open a ticket about
+    // it. 0 disables the warranty sweep; it runs on the maintenance tick.
+    warrantyDays: integer(env, 'WARRANTY_ALERT_DAYS', 30, { min: 0, max: 3650 }),
   };
 }

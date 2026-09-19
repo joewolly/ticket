@@ -123,6 +123,20 @@ export function httpUrl(value, field) {
   return url.toString();
 }
 
+/**
+ * A non-negative decimal amount, for a device's purchase cost. Stored as a
+ * REAL, so it is rounded to cents here rather than carrying a float's tail of
+ * noise into the database. An empty value clears the field.
+ */
+export function optionalMoney(value, field, { max = 1_000_000 } = {}) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) throw new ValidationError(`${field} must be a number`);
+  if (number < 0) throw new ValidationError(`${field} must not be negative`);
+  if (number > max) throw new ValidationError(`${field} must be ${max} or less`);
+  return Math.round(number * 100) / 100;
+}
+
 /** A whole number within bounds, for intervals and offsets. */
 export function boundedInt(value, field, { min, max, fallback } = {}) {
   if (value === undefined || value === null || value === '') {

@@ -225,6 +225,19 @@ export function verifyApiToken(config, req) {
 export const isPublicPath = (pathname) => PUBLIC_PATHS.has(pathname);
 
 /**
+ * The calendar feed is the one endpoint a client cannot present a cookie or a
+ * header to: a calendar app subscribes to a bare URL. So the API token may ride
+ * in the query string here, and here only — the trade is that a token in a URL
+ * can end up in a log, which is why it stays scoped to this single read-only
+ * feed rather than being accepted everywhere.
+ */
+export function verifyCalendarToken(config, req) {
+  if (!config.apiToken) return false;
+  const token = new URL(req.url, 'http://localhost').searchParams.get('token') ?? '';
+  return token !== '' && secretsMatch(config.apiToken, token);
+}
+
+/**
  * Decides whether a request may proceed. Returns null when allowed, or the
  * reason it was refused.
  */
@@ -234,6 +247,7 @@ export function authorize(db, config, req, pathname) {
   // Container orchestrators and uptime monitors cannot hold a session, so the
   // health check can be opened up deliberately. It reports liveness only.
   if (config.publicHealth && pathname === '/api/health') return null;
+  if (pathname === '/api/calendar.ics' && verifyCalendarToken(config, req)) return null;
   if (verifyApiToken(config, req)) return null;
 
   const { [SESSION_COOKIE]: token } = parseCookies(req.headers.cookie);

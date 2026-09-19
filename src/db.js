@@ -124,6 +124,123 @@ const MIGRATIONS = [
   -- the due date moves, so a deferred ticket is announced again if it lapses.
   ALTER TABLE tickets ADD COLUMN overdue_notified_at TEXT;
   `,
+
+  `
+  -- An append-only record of what happened to a ticket and when: status moves,
+  -- priority bumps, device reassignments, due-date shifts. Comments already
+  -- capture what you *say*; this captures what you *do*, so a ticket that sat
+  -- blocked for three weeks no longer looks identical to one fixed on the spot.
+  -- 'from' and 'to' are text snapshots taken at the time, not foreign keys, so
+  -- the log still reads correctly after a device is renamed or deleted.
+  CREATE TABLE ticket_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id  INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL,
+    from_value TEXT,
+    to_value   TEXT,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX idx_ticket_events_ticket ON ticket_events(ticket_id, created_at);
+
+  -- Device lifecycle: the fields you reach for the moment something needs an
+  -- RMA or a replacement budget. warranty_notified_at is the same
+  -- announce-once marker the overdue sweep uses, so an expiring warranty opens
+  -- exactly one ticket rather than one on every sweep.
+  ALTER TABLE devices ADD COLUMN serial_number       TEXT;
+  ALTER TABLE devices ADD COLUMN purchase_date       TEXT;
+  ALTER TABLE devices ADD COLUMN warranty_expires    TEXT;
+  ALTER TABLE devices ADD COLUMN cost                REAL;
+  ALTER TABLE devices ADD COLUMN warranty_notified_at TEXT;
+
+  -- What this device depends on: a VM on its host, everything on the switch it
+  -- hangs off. Self-referential and nullable; ON DELETE SET NULL so removing a
+  -- host orphans its guests rather than cascading them into oblivion.
+  ALTER TABLE devices ADD COLUMN parent_id INTEGER REFERENCES devices(id) ON DELETE SET NULL;
+
+  CREATE INDEX idx_devices_parent ON devices(parent_id);
+
+  -- The same announce-once marker for a due date approaching, distinct from the
+  -- overdue one so a ticket can warn as it nears and again once it lapses. Both
+  -- are cleared together when the due date moves.
+  ALTER TABLE tickets ADD COLUMN due_soon_notified_at TEXT;
+
+  -- Small key/value store for state that has nowhere better to live — currently
+  -- just the timestamp of the last digest sent, so the weekly summary keeps its
+  -- cadence across restarts.
+  CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  -- Full-text search over a ticket's title, body, and every comment on it, kept
+  -- in step by triggers so the data layer never has to think about it. An
+  -- ordinary (not external-content) FTS5 table, which means plain INSERT/DELETE
+  -- by rowid work from triggers without the contentless-table command dance.
+  CREATE VIRTUAL TABLE tickets_fts USING fts5(title, body, comments);
+
+  INSERT INTO tickets_fts(rowid, title, body, comments)
+    SELECT t.id, t.title, t.body,
+           coalesce((SELECT group_concat(c.body, ' ') FROM comments c
+                      WHERE c.ticket_id = t.id), '')
+      FROM tickets t;
+
+  CREATE TRIGGER tickets_fts_ai AFTER INSERT ON tickets BEGIN
+    INSERT INTO tickets_fts(rowid, title, body, comments)
+      VALUES (new.id, new.title, new.body, '');
+  END;
+
+  CREATE TRIGGER tickets_fts_au AFTER UPDATE ON tickets BEGIN
+    UPDATE tickets_fts SET title = new.title, body = new.body WHERE rowid = new.id;
+  END;
+
+  CREATE TRIGGER tickets_fts_ad AFTER DELETE ON tickets BEGIN
+    DELETE FROM tickets_fts WHERE rowid = old.id;
+  END;
+
+  CREATE TRIGGER comments_fts_ai AFTER INSERT ON comments BEGIN
+    UPDATE tickets_fts
+       SET comments = (SELECT group_concat(body, ' ') FROM comments
+                        WHERE ticket_id = new.ticket_id)
+     WHERE rowid = new.ticket_id;
+  END;
+
+  CREATE TRIGGER comments_fts_ad AFTER DELETE ON comments BEGIN
+    UPDATE tickets_fts
+       SET comments = (SELECT coalesce(group_concat(body, ' '), '') FROM comments
+                        WHERE ticket_id = old.ticket_id)
+     WHERE rowid = old.ticket_id;
+  END;
+
+  -- Attachments live as BLOBs in the same file rather than on a separate disk,
+  -- which is the whole point: there is still exactly one thing to back up, and
+  -- VACUUM INTO snapshots the photo of the scorched capacitor along with the
+  -- ticket that explains it. Size is capped at the request layer.
+  CREATE TABLE attachments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id    INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    filename     TEXT    NOT NULL,
+    content_type TEXT    NOT NULL,
+    size         INTEGER NOT NULL,
+    data         BLOB    NOT NULL,
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX idx_attachments_ticket ON attachments(ticket_id);
+  `,
+
+  `
+  -- The insert/delete comment triggers keep the search index current, but an
+  -- edited comment body would leave stale text indexed. Nothing edits a comment
+  -- today, so this is defensive — but it is the missing third of the pair, and
+  -- cheap to have in place before any such feature lands.
+  CREATE TRIGGER comments_fts_au AFTER UPDATE ON comments BEGIN
+    UPDATE tickets_fts
+       SET comments = (SELECT coalesce(group_concat(body, ' '), '') FROM comments
+                        WHERE ticket_id = new.ticket_id)
+     WHERE rowid = new.ticket_id;
+  END;
+  `,
 ];
 
 /**
