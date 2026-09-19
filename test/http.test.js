@@ -267,6 +267,38 @@ test('uploads, serves, and deletes an attachment', async () => {
   assert.equal((await request('GET', `/api/tickets/${id}`)).body.attachments.length, 0);
 });
 
+for (const [filename, contentType, disposition] of [
+  ['photo-café.png', 'image/png', 'inline'],
+  ['照片📷.png', 'image/png', 'inline'],
+  ["账单 (1)'*.pdf", 'application/pdf', 'attachment'],
+  ['100% done.txt', 'text/plain', 'attachment'],
+  ['quoted"name.txt', 'text/plain', 'attachment'],
+  ['control\u007fname.txt', 'text/plain', 'attachment'],
+]) {
+  test(`round-trips attachment filename ${JSON.stringify(filename)} over HTTP`, async () => {
+    const ticket = await request('POST', '/api/tickets', { title: 'Filename round trip' });
+    const up = await fetch(`${base}/api/tickets/${ticket.body.id}/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'X-Filename': encodeURIComponent(filename) },
+      body: PNG,
+    });
+    assert.equal(up.status, 201);
+    const meta = await up.json();
+    assert.equal(meta.filename, filename);
+
+    const download = await fetch(`${base}/api/attachments/${meta.id}`);
+    assert.equal(download.status, 200);
+    const header = download.headers.get('content-disposition');
+    assert.ok(header.startsWith(`${disposition}; `));
+    assert.match(header, /; filename="[\x20-\x21\x23-\x5b\x5d-\x7e]+";/);
+    const encoded = /; filename\*=UTF-8''([^;]+)$/.exec(header)?.[1];
+    assert.ok(encoded, 'the header includes a UTF-8 filename');
+    assert.doesNotMatch(encoded, /[^A-Za-z0-9!#$&+.^_`|~%\-]/);
+    assert.equal(decodeURIComponent(encoded), filename);
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), PNG);
+  });
+}
+
 test('rejects an attachment type that a browser might execute', async () => {
   const ticket = await request('POST', '/api/tickets', { title: 'x' });
   const res = await fetch(`${base}/api/tickets/${ticket.body.id}/attachments`, {

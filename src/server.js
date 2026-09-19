@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 import { openDatabase } from './db.js';
 import { serveStatic } from './static.js';
 import { ValidationError } from './validate.js';
@@ -244,11 +245,18 @@ function decodeFilename(value) {
 function sendAttachment({ db, params, res }) {
   const file = getAttachment(db, params.id);
   const disposition = isInline(file.content_type) ? 'inline' : 'attachment';
+  // Keep the legacy parameter ASCII-only; filename* preserves the full UTF-8
+  // name without putting non-Latin-1 characters into an HTTP header.
+  const fallbackName = file.filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encodedName = encodeURIComponent(file.filename).replace(
+    /['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 
   res.writeHead(200, {
     'Content-Type': file.content_type,
     'Content-Length': file.size,
-    'Content-Disposition': `${disposition}; filename="${file.filename.replace(/"/g, '')}"`,
+    'Content-Disposition': `${disposition}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
     'Cache-Control': 'no-store',
   });
   res.end(Buffer.from(file.data));
@@ -573,7 +581,7 @@ export function startMaintenance(db, config) {
 }
 
 /** Entry point — only runs when this file is executed directly. */
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT ?? 8080);
   const host = process.env.HOST ?? '0.0.0.0';
   const dbPath = process.env.DB_PATH ?? './data/homelab.db';
@@ -595,7 +603,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   server.listen(port, host, () => {
     log.info('listening', {
-      url: `http://${host}:${port}`,
+      url: `http://${host}:${server.address().port}`,
       db: dbPath,
       auth: config.enabled ? (config.apiToken ? 'password+token' : 'password') : 'DISABLED',
       notify: config.notify.enabled ? config.notify.format : 'off',

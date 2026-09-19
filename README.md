@@ -21,7 +21,7 @@ To run it directly instead:
 ```sh
 AUTH_PASSWORD=your-long-passphrase npm start   # http://localhost:8080
 npm run dev                                    # same, with auto-restart
-npm test                                       # 178 tests, no network needed
+npm test                                       # 188 tests, no network needed
 ```
 
 Node 22.16+ is required — for the built-in `node:sqlite` module, and
