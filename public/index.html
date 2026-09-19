@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
-    <title>Homelab Tickets</title>
+    <title>Task Hub</title>
     <link rel="stylesheet" href="/styles.css" />
     <link
       rel="icon"
@@ -15,20 +15,27 @@
     <header class="topbar">
       <a class="brand" href="#/">
         <span class="brand-mark">▪</span>
-        <span>Homelab</span>
+        <span>Task Hub</span>
       </a>
-      <nav class="tabs">
-        <a href="#/" data-tab="dashboard">Dashboard</a>
-        <a href="#/tickets" data-tab="tickets">Tickets</a>
-        <a href="#/devices" data-tab="devices">Devices</a>
-        <a href="#/schedules" data-tab="schedules">Schedules</a>
+      <nav class="tabs" aria-label="Task lists">
+        <a href="#/" data-tab="inbox">Inbox</a>
+        <a href="#/next" data-tab="next">Next</a>
+        <a href="#/someday" data-tab="someday">Someday</a>
+        <a href="#/done" data-tab="done">Done</a>
+        <a href="#/all" data-tab="all">All</a>
       </nav>
       <div class="topbar-actions">
-        <button class="btn btn-primary" id="new-ticket">New ticket</button>
+        <button class="btn btn-primary" id="new-ticket">Add task</button>
         <button class="btn btn-ghost btn-sm" id="shortcuts" title="Keyboard shortcuts (?)">?</button>
         <button class="btn btn-ghost btn-sm" id="sign-out" hidden>Sign out</button>
       </div>
     </header>
+
+    <nav class="secondary-nav" aria-label="Tools">
+      <a href="#/dashboard" data-tab="dashboard">Dashboard</a>
+      <a href="#/devices" data-tab="devices">Devices</a>
+      <a href="#/schedules" data-tab="schedules">Schedules</a>
+    </nav>
 
     <main id="view" aria-live="polite"></main>
 

@@ -241,6 +241,13 @@ const MIGRATIONS = [
      WHERE rowid = new.ticket_id;
   END;
   `,
+  `
+  -- Queue placement is independent of progress/completion. Existing tasks and
+  -- older API clients retain their established active-work behavior.
+  ALTER TABLE tickets ADD COLUMN queue TEXT NOT NULL DEFAULT 'next'
+    CHECK (queue IN ('inbox', 'next', 'someday'));
+  CREATE INDEX idx_tickets_queue_status ON tickets(queue, status);
+  `,
 ];
 
 /**

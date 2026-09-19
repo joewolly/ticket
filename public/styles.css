@@ -286,6 +286,21 @@ label { display: block; font-size: 12px; font-weight: 600; color: var(--text-mut
 .ticket-row:hover { border-color: var(--border-strong); border-left-color: var(--prio, var(--medium)); }
 .ticket-row .main { flex: 1; min-width: 0; }
 .ticket-row .title { font-weight: 550; }
+.ticket-row .title { display: inline-block; overflow-wrap: anywhere; }
+.ticket-row .title:hover { color: var(--accent); }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.bulk-bar[hidden], .bulk-bar button[hidden] { display: none; }
+.ticket-row { flex-wrap: wrap; }
+.ticket-row > .task-actions { width: 100%; padding-left: 30px; }
+.queue-badge { background: var(--accent-soft); color: var(--accent); }
+.secondary-nav { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 20px; padding: 12px 20px 0; color: var(--text-muted); font-size: 13px; }
+.secondary-nav a:hover, .secondary-nav a.active { color: var(--accent); }
+.capture-details summary { cursor: pointer; padding: 12px 0; color: var(--text-muted); }
+.capture-details[open] summary { margin-bottom: 8px; }
+.sidebar-block label { display: block; }
+.sidebar-block label > select, .sidebar-block label > input { margin-top: 6px; }
+button:disabled { opacity: 0.6; cursor: wait; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .ticket-row.done .title { color: var(--text-muted); text-decoration: line-through; }
 .ticket-row .sub {
   display: flex;
@@ -544,8 +559,10 @@ kbd {
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 
 @media (max-width: 640px) {
-  .topbar { gap: 10px; padding: 0 12px; }
-  .brand span:last-child { display: none; }
+  .topbar { gap: 8px; padding: 10px 12px; height: auto; flex-wrap: wrap; }
+  .brand span:last-child { display: inline; }
+  .brand { flex: 1; }
+  .topbar .tabs { order: 3; flex: 1 0 100%; justify-content: space-between; }
   .tabs a { padding: 6px 9px; font-size: 13px; }
   /* Four tabs no longer fit a narrow phone. Letting the nav scroll inside
      itself keeps the page from scrolling sideways as a whole. */
@@ -563,6 +580,13 @@ kbd {
   .detail-grid { grid-template-columns: 1fr; }
   .link-form { flex-wrap: wrap; }
   .link-form input { flex: 1 1 100%; }
+  .task-actions .btn { min-height: 44px; }
+  .ticket-row > .task-actions { padding-left: 0; }
+  .ticket-row > .meta { display: none; }
+  .field-row { flex-direction: column; }
+  .secondary-nav { justify-content: flex-start; padding: 12px; }
+  .filters input, .filters select { width: 100%; min-width: 0; }
+  .modal-backdrop { padding-top: 16px; }
 }
 
 /* ---- Markdown prose ----------------------------------------------------- */

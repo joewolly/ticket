@@ -278,7 +278,7 @@ function buildDigest(db) {
     ),
     stale: scalar(
       `SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})
-         AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`,
+         AND queue = 'next' AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`,
     ),
     upcoming: db
       .prepare(

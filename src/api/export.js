@@ -12,7 +12,7 @@ export const EXPORT_FORMATS = ['json', 'csv'];
 const COLUMNS = {
   tickets: [
     'id', 'title', 'status', 'priority', 'device', 'tags', 'due_date',
-    'created_at', 'updated_at', 'resolved_at', 'comments', 'body',
+    'created_at', 'updated_at', 'resolved_at', 'comments', 'body', 'queue',
   ],
   devices: [
     'id', 'name', 'type', 'status', 'hostname', 'ip_address', 'os',
@@ -33,7 +33,7 @@ const QUERIES = {
               JOIN tags tg ON tg.id = tt.tag_id WHERE tt.ticket_id = t.id) AS tags,
            t.due_date, t.created_at, t.updated_at, t.resolved_at,
            (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id) AS comments,
-           t.body
+           t.body, t.queue
       FROM tickets t
       LEFT JOIN devices d ON d.id = t.device_id`,
 

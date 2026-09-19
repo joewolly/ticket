@@ -38,6 +38,9 @@ export function recordChanges(db, ticketId, before, after, { deviceNames = {} } 
   if (changed('status')) {
     recordEvent(db, ticketId, 'status', before.status, after.status);
   }
+  if (changed('queue')) {
+    recordEvent(db, ticketId, 'queue', before.queue, after.queue);
+  }
   if (changed('priority')) {
     recordEvent(db, ticketId, 'priority', before.priority, after.priority);
   }

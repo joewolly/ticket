@@ -1,0 +1,7 @@
+# Apply after configuring Tailscale Serve on the Docker host.
+# docker compose -f docker-compose.yml -f docker-compose.private.yml up -d
+services:
+  ticket:
+    environment:
+      COOKIE_SECURE: 'true'
+      TRUST_PROXY: 'true'

@@ -1,6 +1,7 @@
-/* Homelab ticket system — single-page client, no build step, no dependencies. */
+/* Task Hub — single-page client, no build step, no dependencies. */
 
 const TICKET_STATUSES = ['open', 'in_progress', 'blocked', 'resolved', 'closed'];
+const TICKET_QUEUES = ['inbox', 'next', 'someday'];
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
 const DEVICE_TYPES = [
   'server', 'nas', 'network', 'vm', 'container-host',
@@ -9,6 +10,11 @@ const DEVICE_TYPES = [
 const DEVICE_STATUSES = ['active', 'spare', 'retired'];
 
 const LABELS = {
+  inbox: 'Inbox',
+  next: 'Next',
+  someday: 'Someday',
+  done: 'Done',
+  all: 'All',
   open: 'Open',
   in_progress: 'In progress',
   blocked: 'Blocked',
@@ -80,7 +86,7 @@ const priorityBadge = (priority) =>
 function select(name, options, value, onchange) {
   return el(
     'select',
-    { name, onchange },
+    { name, onchange, 'aria-label': label(name) },
     ...options.map((opt) => {
       const [val, text] = Array.isArray(opt) ? opt : [opt, label(opt)];
       return el('option', { value: val, selected: String(val) === String(value ?? '') }, text);
@@ -89,7 +95,7 @@ function select(name, options, value, onchange) {
 }
 
 function field(labelText, control) {
-  return el('div', { class: 'field' }, el('label', {}, labelText), control);
+  return el('div', { class: 'field' }, el('label', {}, labelText, control));
 }
 
 function toast(message, isError = false) {
@@ -313,9 +319,26 @@ const prose = (text, extraClass = '') =>
 
 function openModal(title, buildBody, onSubmit) {
   const root = document.getElementById('modal-root');
-  const form = el('form', { class: 'modal' });
-  const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const previousFocus = document.activeElement;
+  let saving = false;
+  const form = el('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title });
+  const close = () => {
+    if (saving) return;
+    root.innerHTML = '';
+    document.removeEventListener('keydown', onKey);
+    previousFocus?.focus();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+    if (e.key !== 'Tab') return;
+    const targets = [...form.querySelectorAll('input, textarea, select, button, summary')]
+      .filter((node) => !node.disabled && node.getClientRects().length > 0);
+    const first = targets[0];
+    const last = targets.at(-1);
+    if (!first) { e.preventDefault(); return; }
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
 
   form.append(
     el('h2', {}, title),
@@ -330,12 +353,26 @@ function openModal(title, buildBody, onSubmit) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (saving) return;
     const data = Object.fromEntries(new FormData(form));
+    saving = true;
+    const controls = [...form.querySelectorAll('button, input, textarea, select')];
+    const disabledStates = controls.map((control) => control.disabled);
+    controls.forEach((control) => { control.disabled = true; });
+    const submit = form.querySelector('[type="submit"]');
+    submit.textContent = 'Saving…';
+    form.setAttribute('aria-busy', 'true');
     try {
       await onSubmit(data);
+      saving = false;
       close();
     } catch (err) {
       toast(err.message, true);
+    } finally {
+      saving = false;
+      controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
+      submit.textContent = 'Save';
+      form.removeAttribute('aria-busy');
     }
   });
 
@@ -363,7 +400,7 @@ async function renderDashboard(view) {
     el(
       'div',
       { class: 'stat-grid' },
-      stat(stats.open_tickets, 'Open tickets'),
+      stat(stats.open_tickets, 'Open tasks'),
       stat(criticalOpen, 'Critical', criticalOpen > 0 ? 'var(--critical)' : null),
       stat(stats.overdue.length, 'Overdue', stats.overdue.length > 0 ? 'var(--high)' : null),
       stat(stats.active_devices, `Active devices of ${stats.total_devices}`),
@@ -495,8 +532,28 @@ function resolvedCard(tickets) {
 
 /* ---- Ticket list -------------------------------------------------------- */
 
-async function renderTickets(view, query) {
+const TASK_LISTS = {
+  inbox: { queue: 'inbox', status: 'active', sort: 'oldest', hint: 'Capture now. Decide what comes next when you are ready.' },
+  next: { queue: 'next', status: 'active', sort: 'priority', hint: 'The things you intend to do.' },
+  someday: { queue: 'someday', status: 'active', sort: 'newest', hint: 'Ideas worth keeping, without a commitment to start.' },
+  done: { status: 'done', sort: 'completed', hint: 'A record of what you have finished.' },
+  all: { status: 'all', sort: 'newest', hint: 'Everything you have captured, including completed tasks.' },
+};
+
+async function renderTickets(view, query, list) {
+  const searching = Boolean(query.q?.trim());
+  const settings = TASK_LISTS[list];
   const params = new URLSearchParams(query);
+  if (settings) {
+    params.set('status', list === 'done' ? 'done' : query.status ?? settings.status);
+    if (settings.queue) params.set('queue', settings.queue);
+    if (!query.sort) params.set('sort', settings.sort);
+  }
+  if (searching) {
+    params.delete('queue');
+    params.delete('status');
+    params.set('status', 'all');
+  }
   const [tickets, devices, tags] = await Promise.all([
     api(`/tickets?${params}`),
     api('/devices'),
@@ -507,10 +564,12 @@ async function renderTickets(view, query) {
     const next = new URLSearchParams(query);
     if (value) next.set(key, value);
     else next.delete(key);
-    location.hash = `#/tickets${next.toString() ? `?${next}` : ''}`;
+    const route = list === 'inbox' ? '/' : list ? `/${list}` : '/tickets';
+    location.hash = `#${route}${next.toString() ? `?${next}` : ''}`;
   };
 
-  const search = searchBox('Search title and description…', query.q, (q) => update('q', q));
+  const search = searchBox('Search all tasks and notes…', query.q, (q) => update('q', q));
+  search.setAttribute('aria-label', 'Search all tasks and notes');
 
   view.append(
     el(
@@ -519,25 +578,27 @@ async function renderTickets(view, query) {
       el(
         'div',
         {},
-        el('h1', {}, 'Tickets'),
+        el('h1', {}, searching ? 'Search all tasks' : list ? label(list) : 'Tasks'),
+        el('p', {}, searching ? 'Results include Inbox, Next, Someday, and Done.' : settings?.hint ?? 'Your tasks, filtered to this view.'),
         el(
           'p',
           {},
-          `${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}`,
+          `${tickets.length} ${tickets.length === 1 ? 'task' : 'tasks'}`,
           exportLinks('tickets'),
         ),
       ),
-      el('button', { class: 'btn btn-primary', onclick: () => newTicketModal() }, 'New ticket'),
     ),
     el(
       'div',
       { class: 'filters' },
       search,
-      select(
+      list !== 'done' && !searching && select(
         'status',
-        [['active', 'Active'], ['all', 'All statuses'], ...TICKET_STATUSES.map((s) => [s, label(s)])],
-        query.status ?? 'active',
-        (e) => update('status', e.target.value === 'active' ? '' : e.target.value),
+        settings?.queue
+          ? [['active', 'Any progress'], ...TICKET_STATUSES.filter((s) => !['resolved', 'closed'].includes(s)).map((s) => [s, label(s)])]
+          : [['active', 'Active'], ['all', 'All statuses'], ['done', 'Done'], ...TICKET_STATUSES.map((s) => [s, label(s)])],
+        params.get('status') ?? 'active',
+        (e) => update('status', e.target.value),
       ),
       select(
         'priority',
@@ -566,8 +627,9 @@ async function renderTickets(view, query) {
           ['oldest', 'Sort: oldest'],
           ['updated', 'Sort: recently updated'],
           ['due', 'Sort: due date'],
+          ['completed', 'Sort: recently completed'],
         ],
-        query.sort ?? 'priority',
+        params.get('sort') ?? 'priority',
         (e) => update('sort', e.target.value),
       ),
     ),
@@ -575,8 +637,8 @@ async function renderTickets(view, query) {
       ? el(
           'div',
           { class: 'empty-state' },
-          el('strong', {}, 'No tickets match'),
-          'Adjust the filters, or create a ticket.',
+          el('strong', {}, list === 'inbox' && !searching ? 'Your inbox is clear' : 'No tasks match'),
+          'Add a task whenever something comes to mind, or adjust the filters.',
         )
       : bulkList(tickets),
   );
@@ -596,14 +658,30 @@ function bulkList(tickets) {
   const refresh = () => {
     bar.hidden = selected.size === 0;
     count.textContent = `${selected.size} selected`;
+    for (const button of bar.querySelectorAll('button[data-state]')) {
+      button.hidden = !tickets.some((task) => selected.has(task.id)
+        && (button.dataset.state === 'open' ? task.is_open : !task.is_open));
+    }
   };
 
-  const apply = (patch, describe) =>
+  let applying = false;
+  const apply = (patch, describe, state) =>
     guard(async () => {
-      const ids = [...selected];
-      const result = await api('/tickets/bulk', { method: 'POST', body: { ids, ...patch } });
-      toast(`${describe} ${result.updated} ticket${result.updated === 1 ? '' : 's'}`);
-      render();
+      if (applying) return;
+      const ids = tickets.filter((task) => selected.has(task.id)
+        && (!state || (state === 'open' ? task.is_open : !task.is_open))).map((task) => task.id);
+      if (!ids.length) return;
+      applying = true;
+      const buttons = [...bar.querySelectorAll('button')];
+      buttons.forEach((button) => { button.disabled = true; });
+      try {
+        const result = await api('/tickets/bulk', { method: 'POST', body: { ids, ...patch } });
+        toast(`${describe} ${result.updated} task${result.updated === 1 ? '' : 's'}`);
+        await render();
+      } finally {
+        applying = false;
+        buttons.forEach((button) => { button.disabled = false; });
+      }
     })();
 
   const addTag = guard(async () => {
@@ -622,8 +700,10 @@ function bulkList(tickets) {
 
   bar.append(
     count,
-    el('button', { class: 'btn btn-sm', onclick: () => apply({ status: 'resolved' }, 'Resolved') }, 'Resolve'),
-    el('button', { class: 'btn btn-sm', onclick: () => apply({ status: 'closed' }, 'Closed') }, 'Close'),
+    tickets.some((t) => t.is_open) && el('button', { class: 'btn btn-sm', onclick: () => apply({ queue: 'next' }, 'Moved to Next:') }, 'Move to Next'),
+    tickets.some((t) => t.is_open) && el('button', { class: 'btn btn-sm', onclick: () => apply({ queue: 'someday' }, 'Saved for Someday:') }, 'Save for Someday'),
+    el('button', { class: 'btn btn-sm', dataset: { state: 'open' }, onclick: () => apply({ status: 'resolved' }, 'Completed', 'open') }, 'Mark Done'),
+    el('button', { class: 'btn btn-sm', dataset: { state: 'done' }, onclick: () => apply({ queue: 'next', status: 'open' }, 'Reopened', 'done') }, 'Reopen in Next'),
     el('button', { class: 'btn btn-sm', onclick: addTag }, 'Add tag…'),
   );
 
@@ -647,7 +727,8 @@ function ticketRow(ticket, onToggle) {
     el('input', {
       type: 'checkbox',
       class: 'row-select',
-      title: 'Select',
+      title: `Select ${ticket.title}`,
+      'aria-label': `Select ${ticket.title}`,
       onclick: (e) => {
         e.stopPropagation();
         onToggle(ticket.id, e.target.checked);
@@ -665,11 +746,12 @@ function ticketRow(ticket, onToggle) {
     el(
       'div',
       { class: 'main' },
-      el('div', { class: 'title' }, ticket.title),
+      el('a', { class: 'title', href: `#/tickets/${ticket.id}` }, ticket.title),
       el(
         'div',
         { class: 'sub' },
         el('span', { class: 'id' }, `#${ticket.id}`),
+        el('span', { class: 'badge queue-badge' }, ticket.is_open ? label(ticket.queue) : 'Done'),
         statusBadge(ticket.status),
         priorityBadge(ticket.priority),
         ticket.device_name && el('span', {}, `· ${ticket.device_name}`),
@@ -680,7 +762,31 @@ function ticketRow(ticket, onToggle) {
       ),
     ),
     el('span', { class: 'meta muted' }, relativeTime(ticket.updated_at)),
+    onToggle && taskActions(ticket),
   );
+}
+
+/** Queue placement never silently reopens completed work. Reopening is explicit. */
+function taskActions(ticket) {
+  const move = (text, changes) => el('button', {
+    class: 'btn btn-sm',
+    onclick: guard(async (event) => {
+      event.stopPropagation();
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        await api(`/tickets/${ticket.id}`, { method: 'PATCH', body: changes });
+        toast(text);
+        await render();
+      } finally { button.disabled = false; }
+    }),
+  }, text);
+  return el('div', { class: 'task-actions' }, ...(ticket.is_open ? [
+    ticket.queue !== 'next' && move('Move to Next', { queue: 'next' }),
+    ticket.queue !== 'someday' && move('Save for Someday', { queue: 'someday' }),
+    move('Mark Done', { status: 'resolved' }),
+  ] : [move('Reopen in Next', { status: 'open', queue: 'next' })]));
 }
 
 /* ---- Ticket detail ------------------------------------------------------ */
@@ -690,12 +796,12 @@ async function renderTicketDetail(view, id) {
 
   const patch = guard(async (changes) => {
     await api(`/tickets/${id}`, { method: 'PATCH', body: changes });
-    toast('Ticket updated');
+    toast('Task updated');
     render();
   });
 
   view.append(
-    el('a', { class: 'back-link', href: '#/tickets' }, '← All tickets'),
+    el('a', { class: 'back-link', href: '#/all' }, '← All tasks'),
     el(
       'div',
       { class: 'detail-grid' },
@@ -721,6 +827,7 @@ async function renderTicketDetail(view, id) {
             el('span', { class: 'id mono muted' }, `#${ticket.id}`),
             statusBadge(ticket.status),
             priorityBadge(ticket.priority),
+            el('span', { class: 'badge queue-badge' }, ticket.is_open ? label(ticket.queue) : 'Done'),
             ...ticket.tags.map((tag) => el('a', { class: 'tag', href: `#/tickets?tag=${tag}` }, tag)),
           ),
         ),
@@ -803,8 +910,10 @@ function eventLine(event) {
   const from = event.from_value;
   const to = event.to_value;
   switch (event.kind) {
+    case 'queue':
+      return ['list → ', el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
     case 'created':
-      return 'opened the ticket';
+      return 'created the task';
     case 'status':
       return [`status → `, el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
     case 'priority':
@@ -830,7 +939,7 @@ function eventLine(event) {
 function commentsCard(ticket, id) {
   const input = el('textarea', {
     name: 'body',
-    placeholder: 'Add a note — what you tried, what fixed it…',
+    placeholder: 'Add a note — details, progress, or something to remember…',
     style: 'min-height: 70px',
   });
 
@@ -977,14 +1086,19 @@ function formatBytes(bytes) {
 
 function ticketSidebar(ticket, devices, patch, id) {
   const block = (labelText, control) =>
-    el('div', { class: 'sidebar-block' }, el('label', {}, labelText), control);
+    el('div', { class: 'sidebar-block' }, el('label', {}, labelText, control));
 
   return el(
     'aside',
     { class: 'card' },
+    taskActions(ticket),
+    block('List', select('queue', TICKET_QUEUES, ticket.queue, (e) => patch({ queue: e.target.value }))),
     block(
       'Status',
-      select('status', TICKET_STATUSES, ticket.status, (e) => patch({ status: e.target.value })),
+      select('status', TICKET_STATUSES, ticket.status, (e) => {
+        const reopening = !ticket.is_open && !['resolved', 'closed'].includes(e.target.value);
+        patch(reopening ? { status: 'open', queue: 'next' } : { status: e.target.value });
+      }),
     ),
     block(
       'Priority',
@@ -1027,13 +1141,13 @@ function ticketSidebar(ticket, devices, patch, id) {
         class: 'btn btn-danger btn-sm',
         style: 'width: 100%',
         onclick: guard(async () => {
-          if (!confirm(`Delete ticket #${id}? This cannot be undone.`)) return;
+          if (!confirm(`Delete task #${id}? This cannot be undone.`)) return;
           await api(`/tickets/${id}`, { method: 'DELETE' });
-          toast('Ticket deleted');
-          location.hash = '#/tickets';
+          toast('Task deleted');
+          location.hash = '#/all';
         }),
       },
-      'Delete ticket',
+      'Delete task',
     ),
   );
 }
@@ -1044,34 +1158,38 @@ async function newTicketModal(presetDeviceId) {
   const devices = await api('/devices').catch(() => []);
 
   openModal(
-    'New ticket',
+    'Add task',
     () =>
       el(
         'div',
         {},
-        field('Title', el('input', { name: 'title', required: true, placeholder: 'What is wrong?' })),
-        field(
-          'Description',
-          el('textarea', { name: 'body', placeholder: 'Symptoms, logs, what you already tried…' }),
-        ),
-        el(
-          'div',
-          { class: 'field-row' },
-          field('Priority', select('priority', PRIORITIES, 'medium')),
+        field('Title', el('input', { name: 'title', required: true, maxlength: 200, placeholder: 'What do you want to remember?' })),
+        el('p', { class: 'muted' }, 'Saved to Inbox. You can sort it out later.'),
+        el('details', { class: 'capture-details' },
+          el('summary', {}, 'Optional details'),
           field(
-            'Device',
-            select(
-              'device_id',
-              [['', '— none —'], ...devices.map((d) => [d.id, d.name])],
-              presetDeviceId ?? '',
+            'Notes',
+            el('textarea', { name: 'body', placeholder: 'Any context, ideas, or next steps…' }),
+          ),
+          el(
+            'div',
+            { class: 'field-row' },
+            field('Priority', select('priority', PRIORITIES, 'medium')),
+            field(
+              'Device',
+              select(
+                'device_id',
+                [['', '— none —'], ...devices.map((d) => [d.id, d.name])],
+                presetDeviceId ?? '',
+              ),
             ),
           ),
-        ),
-        el(
-          'div',
-          { class: 'field-row' },
-          field('Due date', el('input', { name: 'due_date', type: 'date' })),
-          field('Tags', el('input', { name: 'tags', placeholder: 'disk, backup' })),
+          el(
+            'div',
+            { class: 'field-row' },
+            field('Due date', el('input', { name: 'due_date', type: 'date' })),
+            field('Tags', el('input', { name: 'tags', placeholder: 'home, tech, personal' })),
+          ),
         ),
       ),
     async (data) => {
@@ -1079,6 +1197,7 @@ async function newTicketModal(presetDeviceId) {
         method: 'POST',
         body: {
           title: data.title,
+          queue: 'inbox',
           body: data.body,
           priority: data.priority,
           device_id: data.device_id || null,
@@ -1086,16 +1205,15 @@ async function newTicketModal(presetDeviceId) {
           tags: parseTags(data.tags),
         },
       });
-      toast(`Created ticket #${ticket.id}`);
-      location.hash = `#/tickets/${ticket.id}`;
-      render();
+      toast(`Saved to Inbox: ${ticket.title}`);
+      await render();
     },
   );
 }
 
 function editTicketModal(ticket, patch) {
   openModal(
-    `Edit ticket #${ticket.id}`,
+    `Edit task #${ticket.id}`,
     () =>
       el(
         'div',
@@ -1252,7 +1370,7 @@ async function renderDeviceDetail(view, id) {
             el(
               'button',
               { class: 'btn btn-sm', onclick: () => newTicketModal(device.id) },
-              'New ticket',
+              'Add task',
             ),
             el('button', { class: 'btn btn-sm', onclick: () => deviceModal(device) }, 'Edit'),
           ),
@@ -1261,7 +1379,7 @@ async function renderDeviceDetail(view, id) {
         el(
           'section',
           { class: 'card', style: 'margin-bottom: 16px' },
-          el('h2', {}, `Open tickets (${open.length})`),
+          el('h2', {}, `Open tasks (${open.length})`),
           open.length === 0
             ? el('p', { class: 'muted' }, 'Nothing open against this device.')
             : el('div', { class: 'ticket-list' }, ...open.map((t) => ticketRow(t))),
@@ -1855,17 +1973,18 @@ function calendarLink() {
 /* ---- Keyboard ----------------------------------------------------------- */
 
 const SHORTCUTS = [
-  ['n', 'New ticket'],
+  ['n', 'Add task to Inbox'],
   ['/', 'Focus search'],
   ['g then d', 'Go to dashboard'],
-  ['g then t', 'Go to tickets'],
+  ['g then t', 'Go to all tasks'],
+  ['g then i', 'Go to Inbox'],
   ['g then v', 'Go to devices'],
   ['g then s', 'Go to schedules'],
   ['?', 'This help'],
   ['Esc', 'Close dialog'],
 ];
 
-const GO_TO = { d: '#/', t: '#/tickets', v: '#/devices', s: '#/schedules' };
+const GO_TO = { d: '#/dashboard', t: '#/all', i: '#/', v: '#/devices', s: '#/schedules' };
 
 /** True while focus is somewhere that swallows plain keystrokes. */
 function isTyping() {
@@ -1915,7 +2034,7 @@ function installShortcuts() {
   document.addEventListener('keydown', (event) => {
     // Modifier combinations belong to the browser, and anything typed into a
     // field is text rather than a command.
-    if (event.metaKey || event.ctrlKey || event.altKey || isTyping()) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || isTyping() || document.getElementById('modal-root').childElementCount) return;
 
     if (awaitingGo) {
       clearTimeout(goTimer);
@@ -1960,7 +2079,12 @@ function installShortcuts() {
 /* ---- Router ------------------------------------------------------------- */
 
 const ROUTES = [
-  [/^\/?$/, renderDashboard, 'dashboard'],
+  [/^\/?$/, (view, query) => renderTickets(view, query, 'inbox'), 'inbox'],
+  [/^\/next$/, (view, query) => renderTickets(view, query, 'next'), 'next'],
+  [/^\/someday$/, (view, query) => renderTickets(view, query, 'someday'), 'someday'],
+  [/^\/done$/, (view, query) => renderTickets(view, query, 'done'), 'done'],
+  [/^\/all$/, (view, query) => renderTickets(view, query, 'all'), 'all'],
+  [/^\/dashboard$/, renderDashboard, 'dashboard'],
   [/^\/tickets\/(\d+)$/, renderTicketDetail, 'tickets'],
   [/^\/tickets$/, renderTickets, 'tickets'],
   [/^\/devices\/(\d+)$/, renderDeviceDetail, 'devices'],
@@ -1969,7 +2093,9 @@ const ROUTES = [
   [/^\/schedules$/, renderSchedules, 'schedules'],
 ];
 
+let renderVersion = 0;
 async function render() {
+  const version = ++renderVersion;
   clearViewTimers();
   const raw = location.hash.replace(/^#/, '') || '/';
   const [path, queryString = ''] = raw.split('?');
@@ -1980,7 +2106,7 @@ async function render() {
     ([result]) => result,
   );
 
-  for (const link of document.querySelectorAll('.tabs a')) {
+  for (const link of document.querySelectorAll('nav [data-tab]')) {
     link.classList.toggle('active', link.dataset.tab === (match?.[2] ?? ''));
   }
 
@@ -2003,7 +2129,10 @@ async function render() {
     );
   }
 
-  view.replaceWith(next);
+  if (version === renderVersion) {
+    next.setAttribute('aria-live', 'polite');
+    view.replaceWith(next);
+  }
 }
 
 /* ---- Session ------------------------------------------------------------ */

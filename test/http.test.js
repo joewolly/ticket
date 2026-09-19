@@ -30,6 +30,30 @@ test('health check responds', async () => {
   assert.deepEqual(res.body, { status: 'ok' });
 });
 
+test('task queues can be captured, reviewed in bulk, searched, completed, and reopened over HTTP', async () => {
+  const first = await request('POST', '/api/tickets', { title: 'queue-http first', queue: 'inbox' });
+  const second = await request('POST', '/api/tickets', { title: 'queue-http second', queue: 'inbox' });
+  assert.equal(first.status, 201);
+  assert.equal(first.body.queue, 'inbox');
+  const ids = [first.body.id, second.body.id];
+  const move = await request('POST', '/api/tickets/bulk', { ids, queue: 'someday' });
+  assert.equal(move.status, 200);
+  assert.equal(move.body.updated, 2);
+  const inbox = await request('GET', '/api/tickets?queue=inbox&q=queue-http');
+  assert.equal(inbox.body.length, 0);
+  await request('PATCH', `/api/tickets/${ids[0]}`, { status: 'resolved' });
+  const done = await request('GET', '/api/tickets?status=done&q=queue-http');
+  assert.deepEqual(done.body.map((x) => x.id), [ids[0]]);
+  const all = await request('GET', '/api/tickets?status=all&q=queue-http');
+  assert.equal(all.body.length, 2);
+  const reopened = await request('PATCH', `/api/tickets/${ids[0]}`, { queue: 'next', status: 'open' });
+  assert.equal(reopened.body.queue, 'next');
+  assert.equal(reopened.body.resolved_at, null);
+  assert.equal((await request('GET', '/api/tickets?queue=invalid')).status, 400);
+  assert.equal((await request('PATCH', `/api/tickets/${ids[0]}`, { queue: 'invalid' })).status, 400);
+  for (const id of ids) await request('DELETE', `/api/tickets/${id}`);
+});
+
 test('full ticket lifecycle over HTTP', async () => {
   const device = await request('POST', '/api/devices', { name: 'pve-01', type: 'server' });
   assert.equal(device.status, 201);

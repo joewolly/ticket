@@ -13,7 +13,7 @@ COPY src/ ./src/
 COPY public/ ./public/
 
 # The database lives on a mounted volume owned by the unprivileged node user.
-RUN mkdir -p /data && chown -R node:node /data /app
+RUN mkdir -p /data /backups && chown -R node:node /data /backups /app
 USER node
 
 VOLUME ["/data"]
