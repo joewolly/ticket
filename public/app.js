@@ -1,11 +1,43 @@
 /* Task Hub — single-page client, no build step, no dependencies. */
+import {
+  setupPlanning,
+  planningRoutes,
+  refreshPlanning,
+  planningDate,
+  planningCard,
+  planningBadges,
+  checklistCard,
+  saveCurrentView,
+  snoozeModal,
+  recurrenceModal,
+  recurrenceLabel,
+} from './planning.js';
+import {
+  setupCapture,
+  captureRoutes,
+  clearDrafts,
+  pendingCaptureHash,
+} from './capture.js';
 
-const TICKET_STATUSES = ['open', 'in_progress', 'blocked', 'resolved', 'closed'];
+const TICKET_STATUSES = [
+  'open',
+  'in_progress',
+  'blocked',
+  'resolved',
+  'closed',
+];
 const TICKET_QUEUES = ['inbox', 'next', 'someday'];
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
 const DEVICE_TYPES = [
-  'server', 'nas', 'network', 'vm', 'container-host',
-  'iot', 'workstation', 'peripheral', 'other',
+  'server',
+  'nas',
+  'network',
+  'vm',
+  'container-host',
+  'iot',
+  'workstation',
+  'peripheral',
+  'other',
 ];
 const DEVICE_STATUSES = ['active', 'spare', 'retired'];
 
@@ -15,6 +47,7 @@ const LABELS = {
   someday: 'Someday',
   done: 'Done',
   all: 'All',
+  today: 'Today',
   open: 'Open',
   in_progress: 'In progress',
   blocked: 'Blocked',
@@ -40,13 +73,16 @@ async function api(path, { method = 'GET', body } = {}) {
   // The session expired or was revoked — bounce to the login page rather than
   // leaving the user staring at errors on every panel.
   if (res.status === 401) {
+    sessionStorage.setItem('taskhub-return', location.pathname + location.hash);
     location.replace('/login');
     throw new Error('Session expired');
   }
 
   if (res.status === 204) return null;
 
-  const payload = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  const payload = await res
+    .json()
+    .catch(() => ({ error: `HTTP ${res.status}` }));
   if (!res.ok) throw new Error(payload.error ?? `HTTP ${res.status}`);
   return payload;
 }
@@ -65,23 +101,34 @@ function el(tag, props = {}, ...children) {
     if (key === 'class') node.className = value;
     else if (key === 'style') node.setAttribute('style', value);
     else if (key === 'dataset') Object.assign(node.dataset, value);
-    else if (key.startsWith('on')) node.addEventListener(key.slice(2).toLowerCase(), value);
+    else if (key.startsWith('on'))
+      node.addEventListener(key.slice(2).toLowerCase(), value);
     else if (key === 'html') node.innerHTML = value;
     else node.setAttribute(key, value === true ? '' : value);
   }
 
   for (const child of children.flat()) {
     if (child === null || child === undefined || child === false) continue;
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    node.append(
+      child instanceof Node ? child : document.createTextNode(String(child)),
+    );
   }
   return node;
 }
 
 const statusBadge = (status) =>
-  el('span', { class: 'badge badge-status', style: `--c: var(--${status})` }, label(status));
+  el(
+    'span',
+    { class: 'badge badge-status', style: `--c: var(--${status})` },
+    label(status),
+  );
 
 const priorityBadge = (priority) =>
-  el('span', { class: 'badge badge-prio', style: `--c: var(--${priority})` }, label(priority));
+  el(
+    'span',
+    { class: 'badge badge-prio', style: `--c: var(--${priority})` },
+    label(priority),
+  );
 
 function select(name, options, value, onchange) {
   return el(
@@ -89,12 +136,17 @@ function select(name, options, value, onchange) {
     { name, onchange, 'aria-label': label(name) },
     ...options.map((opt) => {
       const [val, text] = Array.isArray(opt) ? opt : [opt, label(opt)];
-      return el('option', { value: val, selected: String(val) === String(value ?? '') }, text);
+      return el(
+        'option',
+        { value: val, selected: String(val) === String(value ?? '') },
+        text,
+      );
     }),
   );
 }
 
 function field(labelText, control) {
+  control.setAttribute('aria-label', labelText);
   return el('div', { class: 'field' }, el('label', {}, labelText, control));
 }
 
@@ -103,7 +155,9 @@ function toast(message, isError = false) {
   node.textContent = message;
   node.className = isError ? 'show error' : 'show';
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { node.className = ''; }, 2600);
+  toast.timer = setTimeout(() => {
+    node.className = '';
+  }, 2600);
 }
 
 /**
@@ -128,7 +182,12 @@ function clearViewTimers() {
  * you had just left, a quarter of a second later.
  */
 function searchBox(placeholder, value, commit) {
-  const input = el('input', { class: 'search', type: 'search', placeholder, value: value ?? '' });
+  const input = el('input', {
+    class: 'search',
+    type: 'search',
+    placeholder,
+    value: value ?? '',
+  });
 
   let timer;
   input.addEventListener('input', () => {
@@ -158,8 +217,12 @@ function relativeTime(value) {
   if (!value) return '';
   const seconds = (Date.now() - parseDate(value).getTime()) / 1000;
   const units = [
-    ['year', 31536000], ['month', 2592000], ['week', 604800],
-    ['day', 86400], ['hour', 3600], ['minute', 60],
+    ['year', 31536000],
+    ['month', 2592000],
+    ['week', 604800],
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60],
   ];
   for (const [unit, size] of units) {
     if (seconds >= size) {
@@ -171,13 +234,18 @@ function relativeTime(value) {
 }
 
 const isOverdue = (ticket) =>
-  ticket.is_open && ticket.due_date && ticket.due_date < new Date().toISOString().slice(0, 10);
+  ticket.is_open && ticket.due_date && ticket.due_date < planningDate;
 
 /** Names the common intervals so a schedule reads as a habit, not a number. */
 function cadence(days) {
   const named = {
-    1: 'daily', 7: 'weekly', 14: 'fortnightly', 30: 'monthly',
-    90: 'quarterly', 182: 'twice a year', 365: 'yearly',
+    1: 'daily',
+    7: 'weekly',
+    14: 'fortnightly',
+    30: 'monthly',
+    90: 'quarterly',
+    182: 'twice a year',
+    365: 'yearly',
   };
   return named[days] ?? `every ${days} days`;
 }
@@ -207,7 +275,9 @@ const safeHref = (url) => (/^https?:\/\//i.test(url ?? '') ? url : '#');
  */
 function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
-  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const lines = String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n');
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -231,7 +301,9 @@ function renderMarkdown(text) {
     if (/^\s*([-*])\s+/.test(line)) {
       const items = [];
       while (i < lines.length && /^\s*([-*])\s+/.test(lines[i])) {
-        items.push(el('li', {}, ...inlineNodes(lines[i].replace(/^\s*([-*])\s+/, ''))));
+        items.push(
+          el('li', {}, ...inlineNodes(lines[i].replace(/^\s*([-*])\s+/, ''))),
+        );
         i++;
       }
       i--;
@@ -242,7 +314,9 @@ function renderMarkdown(text) {
     if (/^\s*\d+\.\s+/.test(line)) {
       const items = [];
       while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(el('li', {}, ...inlineNodes(lines[i].replace(/^\s*\d+\.\s+/, ''))));
+        items.push(
+          el('li', {}, ...inlineNodes(lines[i].replace(/^\s*\d+\.\s+/, ''))),
+        );
         i++;
       }
       i--;
@@ -252,7 +326,8 @@ function renderMarkdown(text) {
 
     if (/^\s*>\s?/.test(line)) {
       const buf = [];
-      while (i < lines.length && /^\s*>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      while (i < lines.length && /^\s*>\s?/.test(lines[i]))
+        buf.push(lines[i++].replace(/^\s*>\s?/, ''));
       i--;
       frag.append(el('blockquote', {}, ...inlineNodes(buf.join('\n'))));
       continue;
@@ -301,9 +376,25 @@ function inlineNodes(text) {
     else if (m[5]) {
       const [, label] = m[5].match(/^\[([^\]]+)\]/);
       const [, url] = m[5].match(/\((https?:\/\/[^\s)]+)\)$/);
-      nodes.push(el('a', { href: safeHref(url), target: '_blank', rel: 'noopener noreferrer' }, label));
+      nodes.push(
+        el(
+          'a',
+          { href: safeHref(url), target: '_blank', rel: 'noopener noreferrer' },
+          label,
+        ),
+      );
     } else if (m[6]) {
-      nodes.push(el('a', { href: safeHref(m[6]), target: '_blank', rel: 'noopener noreferrer' }, m[6]));
+      nodes.push(
+        el(
+          'a',
+          {
+            href: safeHref(m[6]),
+            target: '_blank',
+            rel: 'noopener noreferrer',
+          },
+          m[6],
+        ),
+      );
     }
     last = pattern.lastIndex;
   }
@@ -313,7 +404,11 @@ function inlineNodes(text) {
 
 /** A 'prose' block whose content is rendered from Markdown. */
 const prose = (text, extraClass = '') =>
-  el('div', { class: `prose${extraClass ? ` ${extraClass}` : ''}` }, renderMarkdown(text));
+  el(
+    'div',
+    { class: `prose${extraClass ? ` ${extraClass}` : ''}` },
+    renderMarkdown(text),
+  );
 
 /* ---- Modal -------------------------------------------------------------- */
 
@@ -321,7 +416,12 @@ function openModal(title, buildBody, onSubmit) {
   const root = document.getElementById('modal-root');
   const previousFocus = document.activeElement;
   let saving = false;
-  const form = el('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title });
+  const form = el('form', {
+    class: 'modal',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-label': title,
+  });
   const close = () => {
     if (saving) return;
     root.innerHTML = '';
@@ -331,13 +431,24 @@ function openModal(title, buildBody, onSubmit) {
   const onKey = (e) => {
     if (e.key === 'Escape') close();
     if (e.key !== 'Tab') return;
-    const targets = [...form.querySelectorAll('input, textarea, select, button, summary')]
-      .filter((node) => !node.matches(':disabled') && node.getClientRects().length > 0);
+    const targets = [
+      ...form.querySelectorAll('input, textarea, select, button, summary'),
+    ].filter(
+      (node) => !node.matches(':disabled') && node.getClientRects().length > 0,
+    );
     const first = targets[0];
     const last = targets.at(-1);
-    if (!first) { e.preventDefault(); return; }
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    if (!first) {
+      e.preventDefault();
+      return;
+    }
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   };
 
   form.append(
@@ -356,9 +467,13 @@ function openModal(title, buildBody, onSubmit) {
     if (saving) return;
     const data = Object.fromEntries(new FormData(form));
     saving = true;
-    const controls = [...form.querySelectorAll('button, input, textarea, select')];
+    const controls = [
+      ...form.querySelectorAll('button, input, textarea, select'),
+    ];
     const disabledStates = controls.map((control) => control.disabled);
-    controls.forEach((control) => { control.disabled = true; });
+    controls.forEach((control) => {
+      control.disabled = true;
+    });
     const submit = form.querySelector('[type="submit"]');
     submit.textContent = 'Saving…';
     form.setAttribute('aria-busy', 'true');
@@ -370,14 +485,18 @@ function openModal(title, buildBody, onSubmit) {
       toast(err.message, true);
     } finally {
       saving = false;
-      controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
+      controls.forEach((control, i) => {
+        control.disabled = disabledStates[i];
+      });
       submit.textContent = submit.dataset.idleLabel || 'Save';
       form.removeAttribute('aria-busy');
     }
   });
 
   const backdrop = el('div', { class: 'modal-backdrop' }, form);
-  backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) close(); });
+  backdrop.addEventListener('mousedown', (e) => {
+    if (e.target === backdrop) close();
+  });
   document.addEventListener('keydown', onKey);
 
   root.innerHTML = '';
@@ -386,7 +505,11 @@ function openModal(title, buildBody, onSubmit) {
 }
 
 /** Splits the comma-separated tag input into the array the API expects. */
-const parseTags = (value) => (value ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+const parseTags = (value) =>
+  (value ?? '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
 
 /* ---- Dashboard ---------------------------------------------------------- */
 
@@ -401,8 +524,16 @@ async function renderDashboard(view) {
       'div',
       { class: 'stat-grid' },
       stat(stats.open_tickets, 'Open tasks'),
-      stat(criticalOpen, 'Critical', criticalOpen > 0 ? 'var(--critical)' : null),
-      stat(stats.overdue.length, 'Overdue', stats.overdue.length > 0 ? 'var(--high)' : null),
+      stat(
+        criticalOpen,
+        'Critical',
+        criticalOpen > 0 ? 'var(--critical)' : null,
+      ),
+      stat(
+        stats.overdue.length,
+        'Overdue',
+        stats.overdue.length > 0 ? 'var(--high)' : null,
+      ),
       stat(stats.active_devices, `Active devices of ${stats.total_devices}`),
     ),
     el(
@@ -411,6 +542,25 @@ async function renderDashboard(view) {
       priorityCard(stats.by_priority, stats.open_tickets),
       hotDevicesCard(stats.hot_devices),
       attentionCard(stats.overdue, stats.stale),
+      el(
+        'section',
+        { class: 'card' },
+        el('h2', {}, 'Follow up'),
+        stats.follow_ups.length
+          ? el(
+              'ul',
+              { class: 'mini-list' },
+              ...stats.follow_ups.map((t) =>
+                el(
+                  'li',
+                  {},
+                  el('a', { href: `#/tickets/${t.id}` }, t.title),
+                  el('span', { class: 'muted' }, t.waiting_on),
+                ),
+              ),
+            )
+          : el('p', { class: 'muted' }, 'No follow-ups due.'),
+      ),
       resolvedCard(stats.recently_resolved),
     ),
   );
@@ -420,13 +570,19 @@ function stat(value, text, color) {
   return el(
     'div',
     { class: 'stat' },
-    el('div', { class: 'value', style: color ? `color: ${color}` : null }, value),
+    el(
+      'div',
+      { class: 'value', style: color ? `color: ${color}` : null },
+      value,
+    ),
     el('div', { class: 'label' }, text),
   );
 }
 
 function priorityCard(byPriority, total) {
-  const counts = Object.fromEntries(byPriority.map((r) => [r.priority, r.count]));
+  const counts = Object.fromEntries(
+    byPriority.map((r) => [r.priority, r.count]),
+  );
   const max = Math.max(1, ...Object.values(counts));
 
   return el(
@@ -440,7 +596,11 @@ function priorityCard(byPriority, total) {
           return el(
             'div',
             { class: 'bar-row' },
-            el('a', { href: `#/tickets?priority=${priority}` }, label(priority)),
+            el(
+              'a',
+              { href: `#/tickets?priority=${priority}` },
+              label(priority),
+            ),
             el(
               'div',
               { class: 'bar-track' },
@@ -470,11 +630,7 @@ function hotDevicesCard(devices) {
               'li',
               {},
               el('a', { href: `#/devices/${device.id}` }, device.name),
-              el(
-                'span',
-                { class: 'meta' },
-                `${device.open_tickets} open`,
-              ),
+              el('span', { class: 'meta' }, `${device.open_tickets} open`),
             ),
           ),
         ),
@@ -484,7 +640,10 @@ function hotDevicesCard(devices) {
 function attentionCard(overdue, stale) {
   const rows = [
     ...overdue.map((t) => ({ ...t, note: `due ${t.due_date}`, urgent: true })),
-    ...stale.map((t) => ({ ...t, note: `quiet ${relativeTime(t.updated_at)}` })),
+    ...stale.map((t) => ({
+      ...t,
+      note: `quiet ${relativeTime(t.updated_at)}`,
+    })),
   ].slice(0, 8);
 
   return el(
@@ -533,11 +692,34 @@ function resolvedCard(tickets) {
 /* ---- Ticket list -------------------------------------------------------- */
 
 const TASK_LISTS = {
-  inbox: { queue: 'inbox', status: 'active', sort: 'oldest', hint: 'Capture now. Decide what comes next when you are ready.' },
-  next: { queue: 'next', status: 'active', sort: 'priority', hint: 'The things you intend to do.' },
-  someday: { queue: 'someday', status: 'active', sort: 'newest', hint: 'Ideas worth keeping, without a commitment to start.' },
-  done: { status: 'done', sort: 'completed', hint: 'A record of what you have finished.' },
-  all: { status: 'all', sort: 'newest', hint: 'Everything you have captured, including completed tasks.' },
+  inbox: {
+    queue: 'inbox',
+    status: 'active',
+    sort: 'oldest',
+    hint: 'Capture now. Decide what comes next when you are ready.',
+  },
+  next: {
+    queue: 'next',
+    status: 'active',
+    sort: 'priority',
+    hint: 'The things you intend to do.',
+  },
+  someday: {
+    queue: 'someday',
+    status: 'active',
+    sort: 'newest',
+    hint: 'Ideas worth keeping, without a commitment to start.',
+  },
+  done: {
+    status: 'done',
+    sort: 'completed',
+    hint: 'A record of what you have finished.',
+  },
+  all: {
+    status: 'all',
+    sort: 'newest',
+    hint: 'Everything you have captured, including completed tasks.',
+  },
 };
 
 async function renderTickets(view, query, list) {
@@ -545,7 +727,10 @@ async function renderTickets(view, query, list) {
   const settings = TASK_LISTS[list];
   const params = new URLSearchParams(query);
   if (settings) {
-    params.set('status', list === 'done' ? 'done' : query.status ?? settings.status);
+    params.set(
+      'status',
+      list === 'done' ? 'done' : (query.status ?? settings.status),
+    );
     if (settings.queue) params.set('queue', settings.queue);
     if (!query.sort) params.set('sort', settings.sort);
   }
@@ -554,6 +739,8 @@ async function renderTickets(view, query, list) {
     params.delete('status');
     params.set('status', 'all');
   }
+  if (!searching && ['inbox', 'next'].includes(list))
+    params.set('actionable', 'true');
   const [tickets, devices, tags] = await Promise.all([
     api(`/tickets?${params}`),
     api('/devices'),
@@ -568,7 +755,9 @@ async function renderTickets(view, query, list) {
     location.hash = `#${route}${next.toString() ? `?${next}` : ''}`;
   };
 
-  const search = searchBox('Search all tasks and notes…', query.q, (q) => update('q', q));
+  const search = searchBox('Search all tasks and notes…', query.q, (q) =>
+    update('q', q),
+  );
   search.setAttribute('aria-label', 'Search all tasks and notes');
 
   view.append(
@@ -578,8 +767,18 @@ async function renderTickets(view, query, list) {
       el(
         'div',
         {},
-        el('h1', {}, searching ? 'Search all tasks' : list ? label(list) : 'Tasks'),
-        el('p', {}, searching ? 'Results include Inbox, Next, Someday, and Done.' : settings?.hint ?? 'Your tasks, filtered to this view.'),
+        el(
+          'h1',
+          {},
+          searching ? 'Search all tasks' : list ? label(list) : 'Tasks',
+        ),
+        el(
+          'p',
+          {},
+          searching
+            ? 'Results include Inbox, Next, Someday, and Done.'
+            : (settings?.hint ?? 'Your tasks, filtered to this view.'),
+        ),
         el(
           'p',
           {},
@@ -592,14 +791,26 @@ async function renderTickets(view, query, list) {
       'div',
       { class: 'filters' },
       search,
-      list !== 'done' && !searching && select(
-        'status',
-        settings?.queue
-          ? [['active', 'Any progress'], ...TICKET_STATUSES.filter((s) => !['resolved', 'closed'].includes(s)).map((s) => [s, label(s)])]
-          : [['active', 'Active'], ['all', 'All statuses'], ['done', 'Done'], ...TICKET_STATUSES.map((s) => [s, label(s)])],
-        params.get('status') ?? 'active',
-        (e) => update('status', e.target.value),
-      ),
+      list !== 'done' &&
+        !searching &&
+        select(
+          'status',
+          settings?.queue
+            ? [
+                ['active', 'Any progress'],
+                ...TICKET_STATUSES.filter(
+                  (s) => !['resolved', 'closed'].includes(s),
+                ).map((s) => [s, label(s)]),
+              ]
+            : [
+                ['active', 'Active'],
+                ['all', 'All statuses'],
+                ['done', 'Done'],
+                ...TICKET_STATUSES.map((s) => [s, label(s)]),
+              ],
+          params.get('status') ?? 'active',
+          (e) => update('status', e.target.value),
+        ),
       select(
         'priority',
         [['', 'Any priority'], ...PRIORITIES.map((p) => [p, label(p)])],
@@ -615,7 +826,10 @@ async function renderTickets(view, query, list) {
       tags.length > 0 &&
         select(
           'tag',
-          [['', 'Any tag'], ...tags.map((t) => [t.name, `${t.name} (${t.ticket_count})`])],
+          [
+            ['', 'Any tag'],
+            ...tags.map((t) => [t.name, `${t.name} (${t.ticket_count})`]),
+          ],
           query.tag,
           (e) => update('tag', e.target.value),
         ),
@@ -633,11 +847,29 @@ async function renderTickets(view, query, list) {
         (e) => update('sort', e.target.value),
       ),
     ),
+    el(
+      'div',
+      { class: 'planning-actions list-tools' },
+      el(
+        'button',
+        {
+          class: 'btn btn-sm',
+          onclick: guard(() => saveCurrentView(Object.fromEntries(params))),
+        },
+        'Save this view…',
+      ),
+    ),
     tickets.length === 0
       ? el(
           'div',
           { class: 'empty-state' },
-          el('strong', {}, list === 'inbox' && !searching ? 'Your inbox is clear' : 'No tasks match'),
+          el(
+            'strong',
+            {},
+            list === 'inbox' && !searching
+              ? 'Your inbox is clear'
+              : 'No tasks match',
+          ),
           'Add a task whenever something comes to mind, or adjust the filters.',
         )
       : bulkList(tickets),
@@ -659,8 +891,11 @@ function bulkList(tickets) {
     bar.hidden = selected.size === 0;
     count.textContent = `${selected.size} selected`;
     for (const button of bar.querySelectorAll('button[data-state]')) {
-      button.hidden = !tickets.some((task) => selected.has(task.id)
-        && (button.dataset.state === 'open' ? task.is_open : !task.is_open));
+      button.hidden = !tickets.some(
+        (task) =>
+          selected.has(task.id) &&
+          (button.dataset.state === 'open' ? task.is_open : !task.is_open),
+      );
     }
   };
 
@@ -668,19 +903,33 @@ function bulkList(tickets) {
   const apply = (patch, describe, state) =>
     guard(async () => {
       if (applying) return;
-      const ids = tickets.filter((task) => selected.has(task.id)
-        && (!state || (state === 'open' ? task.is_open : !task.is_open))).map((task) => task.id);
+      const ids = tickets
+        .filter(
+          (task) =>
+            selected.has(task.id) &&
+            (!state || (state === 'open' ? task.is_open : !task.is_open)),
+        )
+        .map((task) => task.id);
       if (!ids.length) return;
       applying = true;
       const buttons = [...bar.querySelectorAll('button')];
-      buttons.forEach((button) => { button.disabled = true; });
+      buttons.forEach((button) => {
+        button.disabled = true;
+      });
       try {
-        const result = await api('/tickets/bulk', { method: 'POST', body: { ids, ...patch } });
-        toast(`${describe} ${result.updated} task${result.updated === 1 ? '' : 's'}`);
+        const result = await api('/tickets/bulk', {
+          method: 'POST',
+          body: { ids, ...patch },
+        });
+        toast(
+          `${describe} ${result.updated} task${result.updated === 1 ? '' : 's'}`,
+        );
         await render();
       } finally {
         applying = false;
-        buttons.forEach((button) => { button.disabled = false; });
+        buttons.forEach((button) => {
+          button.disabled = false;
+        });
       }
     })();
 
@@ -700,10 +949,52 @@ function bulkList(tickets) {
 
   bar.append(
     count,
-    tickets.some((t) => t.is_open) && el('button', { class: 'btn btn-sm', onclick: () => apply({ queue: 'next' }, 'Moved to Next:') }, 'Move to Next'),
-    tickets.some((t) => t.is_open) && el('button', { class: 'btn btn-sm', onclick: () => apply({ queue: 'someday' }, 'Saved for Someday:') }, 'Save for Someday'),
-    el('button', { class: 'btn btn-sm', dataset: { state: 'open' }, onclick: () => apply({ status: 'resolved' }, 'Completed', 'open') }, 'Mark Done'),
-    el('button', { class: 'btn btn-sm', dataset: { state: 'done' }, onclick: () => apply({ queue: 'next', status: 'open' }, 'Reopened', 'done') }, 'Reopen in Next'),
+    el(
+      'button',
+      {
+        class: 'btn btn-sm',
+        dataset: { state: 'open' },
+        onclick: () => apply({ today: true }, 'Added to Today:', 'open'),
+      },
+      'Add to Today',
+    ),
+    tickets.some((t) => t.is_open) &&
+      el(
+        'button',
+        {
+          class: 'btn btn-sm',
+          onclick: () => apply({ queue: 'next' }, 'Moved to Next:'),
+        },
+        'Move to Next',
+      ),
+    tickets.some((t) => t.is_open) &&
+      el(
+        'button',
+        {
+          class: 'btn btn-sm',
+          onclick: () => apply({ queue: 'someday' }, 'Saved for Someday:'),
+        },
+        'Save for Someday',
+      ),
+    el(
+      'button',
+      {
+        class: 'btn btn-sm',
+        dataset: { state: 'open' },
+        onclick: () => apply({ status: 'resolved' }, 'Completed', 'open'),
+      },
+      'Mark Done',
+    ),
+    el(
+      'button',
+      {
+        class: 'btn btn-sm',
+        dataset: { state: 'done' },
+        onclick: () =>
+          apply({ queue: 'next', status: 'open' }, 'Reopened', 'done'),
+      },
+      'Reopen in Next',
+    ),
     el('button', { class: 'btn btn-sm', onclick: addTag }, 'Add tag…'),
   );
 
@@ -717,7 +1008,11 @@ function bulkList(tickets) {
     'div',
     {},
     bar,
-    el('div', { class: 'ticket-list' }, ...tickets.map((t) => ticketRow(t, onToggle))),
+    el(
+      'div',
+      { class: 'ticket-list' },
+      ...tickets.map((t) => ticketRow(t, onToggle)),
+    ),
   );
 }
 
@@ -740,7 +1035,9 @@ function ticketRow(ticket, onToggle) {
     {
       class: `ticket-row${ticket.is_open ? '' : ' done'}`,
       style: `--prio: var(--${ticket.priority})`,
-      onclick: () => { location.hash = `#/tickets/${ticket.id}`; },
+      onclick: () => {
+        location.hash = `#/tickets/${ticket.id}`;
+      },
     },
     checkbox,
     el(
@@ -751,13 +1048,23 @@ function ticketRow(ticket, onToggle) {
         'div',
         { class: 'sub' },
         el('span', { class: 'id' }, `#${ticket.id}`),
-        el('span', { class: 'badge queue-badge' }, ticket.is_open ? label(ticket.queue) : 'Done'),
+        el(
+          'span',
+          { class: 'badge queue-badge' },
+          ticket.is_open ? label(ticket.queue) : 'Done',
+        ),
         statusBadge(ticket.status),
         priorityBadge(ticket.priority),
         ticket.device_name && el('span', {}, `· ${ticket.device_name}`),
         ticket.due_date &&
-          el('span', { class: isOverdue(ticket) ? 'overdue' : '' }, `· due ${ticket.due_date}`),
-        ticket.comment_count > 0 && el('span', {}, `· ${ticket.comment_count} 💬`),
+          el(
+            'span',
+            { class: isOverdue(ticket) ? 'overdue' : '' },
+            `· due ${ticket.due_date}`,
+          ),
+        ticket.comment_count > 0 &&
+          el('span', {}, `· ${ticket.comment_count} 💬`),
+        ...planningBadges(ticket),
         ...ticket.tags.map((tag) => el('span', { class: 'tag' }, tag)),
       ),
     ),
@@ -767,32 +1074,69 @@ function ticketRow(ticket, onToggle) {
 }
 
 /** Queue placement never silently reopens completed work. Reopening is explicit. */
-function taskActions(ticket) {
-  const move = (text, changes) => el('button', {
-    class: 'btn btn-sm',
-    onclick: guard(async (event) => {
-      event.stopPropagation();
-      const button = event.currentTarget;
-      if (button.disabled) return;
-      button.disabled = true;
-      try {
-        await api(`/tickets/${ticket.id}`, { method: 'PATCH', body: changes });
-        toast(text);
-        await render();
-      } finally { button.disabled = false; }
-    }),
-  }, text);
-  return el('div', { class: 'task-actions' }, ...(ticket.is_open ? [
-    ticket.queue !== 'next' && move('Move to Next', { queue: 'next' }),
-    ticket.queue !== 'someday' && move('Save for Someday', { queue: 'someday' }),
-    move('Mark Done', { status: 'resolved' }),
-  ] : [move('Reopen in Next', { status: 'open', queue: 'next' })]));
+function taskActions(ticket, includePlanning = true) {
+  const move = (text, changes) =>
+    el(
+      'button',
+      {
+        class: 'btn btn-sm',
+        onclick: guard(async (event) => {
+          event.stopPropagation();
+          const button = event.currentTarget;
+          if (button.disabled) return;
+          button.disabled = true;
+          try {
+            await api(`/tickets/${ticket.id}`, {
+              method: 'PATCH',
+              body: changes,
+            });
+            toast(text);
+            await render();
+          } finally {
+            button.disabled = false;
+          }
+        }),
+      },
+      text,
+    );
+  return el(
+    'div',
+    { class: 'task-actions' },
+    ...(ticket.is_open
+      ? [
+          includePlanning &&
+            move(ticket.today_rank === null ? 'Today' : 'Remove from Today', {
+              today: ticket.today_rank === null,
+            }),
+          includePlanning &&
+            el(
+              'button',
+              {
+                class: 'btn btn-sm',
+                onclick: (event) => {
+                  event.stopPropagation();
+                  snoozeModal(ticket);
+                },
+              },
+              'Snooze…',
+            ),
+          ticket.queue !== 'next' && move('Move to Next', { queue: 'next' }),
+          ticket.queue !== 'someday' &&
+            move('Save for Someday', { queue: 'someday' }),
+          move('Mark Done', { status: 'resolved' }),
+        ]
+      : [move('Reopen in Next', { status: 'open', queue: 'next' })]),
+  );
 }
 
 /* ---- Ticket detail ------------------------------------------------------ */
 
 async function renderTicketDetail(view, id) {
-  const [ticket, devices] = await Promise.all([api(`/tickets/${id}`), api('/devices')]);
+  const [ticket, devices] = await Promise.all([
+    api(`/tickets/${id}`),
+    api('/devices'),
+  ]);
+  const planning = await planningCard(ticket);
 
   const patch = guard(async (changes) => {
     await api(`/tickets/${id}`, { method: 'PATCH', body: changes });
@@ -817,7 +1161,10 @@ async function renderTicketDetail(view, id) {
             el('h1', {}, ticket.title),
             el(
               'button',
-              { class: 'btn btn-sm', onclick: () => editTicketModal(ticket, patch) },
+              {
+                class: 'btn btn-sm',
+                onclick: () => editTicketModal(ticket, patch),
+              },
               'Edit',
             ),
           ),
@@ -827,8 +1174,14 @@ async function renderTicketDetail(view, id) {
             el('span', { class: 'id mono muted' }, `#${ticket.id}`),
             statusBadge(ticket.status),
             priorityBadge(ticket.priority),
-            el('span', { class: 'badge queue-badge' }, ticket.is_open ? label(ticket.queue) : 'Done'),
-            ...ticket.tags.map((tag) => el('a', { class: 'tag', href: `#/tickets?tag=${tag}` }, tag)),
+            el(
+              'span',
+              { class: 'badge queue-badge' },
+              ticket.is_open ? label(ticket.queue) : 'Done',
+            ),
+            ...ticket.tags.map((tag) =>
+              el('a', { class: 'tag', href: `#/tickets?tag=${tag}` }, tag),
+            ),
           ),
         ),
         el(
@@ -839,6 +1192,8 @@ async function renderTicketDetail(view, id) {
             ? prose(ticket.body)
             : el('div', { class: 'prose empty' }, 'No description.'),
         ),
+        planning,
+        checklistCard(ticket),
         linksCard(ticket, id),
         attachmentsCard(ticket, id),
         commentsCard(ticket, id),
@@ -850,7 +1205,12 @@ async function renderTicketDetail(view, id) {
 
 /** Reference material for a ticket: the thread that explained it, the runbook. */
 function linksCard(ticket, id) {
-  const url = el('input', { name: 'url', type: 'url', placeholder: 'https://…', required: true });
+  const url = el('input', {
+    name: 'url',
+    type: 'url',
+    placeholder: 'https://…',
+    required: true,
+  });
   const label = el('input', { name: 'label', placeholder: 'Label (optional)' });
 
   const submit = guard(async (event) => {
@@ -878,7 +1238,11 @@ function linksCard(ticket, id) {
               {},
               el(
                 'a',
-                { href: safeHref(link.url), target: '_blank', rel: 'noopener noreferrer' },
+                {
+                  href: safeHref(link.url),
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                },
                 link.label || link.url,
               ),
               el(
@@ -886,7 +1250,9 @@ function linksCard(ticket, id) {
                 {
                   class: 'btn btn-ghost btn-sm delete',
                   onclick: guard(async () => {
-                    await api(`/tickets/${id}/links/${link.id}`, { method: 'DELETE' });
+                    await api(`/tickets/${id}/links/${link.id}`, {
+                      method: 'DELETE',
+                    });
                     render();
                   }),
                 },
@@ -911,21 +1277,47 @@ function eventLine(event) {
   const to = event.to_value;
   switch (event.kind) {
     case 'queue':
-      return ['list → ', el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
+      return [
+        'list → ',
+        el('strong', {}, label(to)),
+        from ? ` (was ${label(from)})` : '',
+      ];
     case 'created':
       return 'created the task';
     case 'status':
-      return [`status → `, el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
+      return [
+        `status → `,
+        el('strong', {}, label(to)),
+        from ? ` (was ${label(from)})` : '',
+      ];
     case 'priority':
-      return [`priority → `, el('strong', {}, label(to)), from ? ` (was ${label(from)})` : ''];
+      return [
+        `priority → `,
+        el('strong', {}, label(to)),
+        from ? ` (was ${label(from)})` : '',
+      ];
     case 'device':
-      return to ? `assigned to ${to}` : `unassigned${from ? ` from ${from}` : ''}`;
+      return to
+        ? `assigned to ${to}`
+        : `unassigned${from ? ` from ${from}` : ''}`;
     case 'due_date':
       return to ? `due date set to ${to}` : 'due date cleared';
     case 'title':
       return 'renamed the ticket';
     case 'tags':
       return to ? `tags → ${to}` : 'tags cleared';
+    case 'today_rank':
+      return to === null ? 'removed from Today' : 'added to Today';
+    case 'snoozed_until':
+      return to ? `snoozed until ${to}` : 'unsnoozed';
+    case 'waiting_on':
+      return to ? `waiting on ${to}` : 'cleared waiting';
+    case 'follow_up_date':
+      return to ? `follow up on ${to}` : 'follow-up date cleared';
+    case 'project_id':
+      return to ? `assigned to project #${to}` : 'removed from project';
+    case 'checklist':
+      return to || 'updated checklist';
     default:
       return event.kind;
   }
@@ -955,7 +1347,11 @@ function commentsCard(ticket, id) {
   // Merge the two streams and order by time; comments keep their delete control.
   const entries = [
     ...ticket.events.map((e) => ({ at: e.created_at, kind: 'event', data: e })),
-    ...ticket.comments.map((c) => ({ at: c.created_at, kind: 'comment', data: c })),
+    ...ticket.comments.map((c) => ({
+      at: c.created_at,
+      kind: 'comment',
+      data: c,
+    })),
   ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 
   const row = (entry) =>
@@ -964,7 +1360,11 @@ function commentsCard(ticket, id) {
           'div',
           { class: 'event' },
           el('span', { class: 'event-dot' }),
-          el('span', { class: 'event-text' }, ...[].concat(eventLine(entry.data))),
+          el(
+            'span',
+            { class: 'event-text' },
+            ...[].concat(eventLine(entry.data)),
+          ),
           el('span', { class: 'event-when muted' }, relativeTime(entry.at)),
         )
       : el(
@@ -979,7 +1379,9 @@ function commentsCard(ticket, id) {
               {
                 class: 'btn btn-ghost btn-sm delete',
                 onclick: guard(async () => {
-                  await api(`/tickets/${id}/comments/${entry.data.id}`, { method: 'DELETE' });
+                  await api(`/tickets/${id}/comments/${entry.data.id}`, {
+                    method: 'DELETE',
+                  });
                   render();
                 }),
               },
@@ -1001,7 +1403,11 @@ function commentsCard(ticket, id) {
       el(
         'div',
         { style: 'margin-top: 8px; display: flex; justify-content: flex-end' },
-        el('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Add note'),
+        el(
+          'button',
+          { class: 'btn btn-primary btn-sm', type: 'submit' },
+          'Add note',
+        ),
       ),
     ),
   );
@@ -1025,12 +1431,19 @@ async function uploadAttachment(id, file) {
 }
 
 const ATTACHMENT_TYPES = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-  webp: 'image/webp', pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  log: 'text/plain',
 };
 
 function attachmentType(file) {
-  const extensionType = ATTACHMENT_TYPES[file.name.split('.').pop().toLowerCase()];
+  const extensionType =
+    ATTACHMENT_TYPES[file.name.split('.').pop().toLowerCase()];
   return Object.values(ATTACHMENT_TYPES).includes(file.type)
     ? file.type
     : extensionType || 'application/octet-stream';
@@ -1040,7 +1453,8 @@ function attachmentError(file) {
   if (!file.size) return 'File is empty';
   if (file.size > 1024 * 1024) return 'Larger than 1 MB';
   if (file.name.length > 200) return 'Filename must be 200 characters or fewer';
-  if (!Object.values(ATTACHMENT_TYPES).includes(attachmentType(file))) return 'Unsupported file type';
+  if (!Object.values(ATTACHMENT_TYPES).includes(attachmentType(file)))
+    return 'Unsupported file type';
   return '';
 }
 
@@ -1060,20 +1474,35 @@ function attachmentsCard(ticket, id) {
     const href = `/api/attachments/${att.id}`;
     const preview = att.content_type.startsWith('image/')
       ? el('img', { src: href, alt: att.filename, class: 'attach-thumb' })
-      : el('span', { class: 'attach-icon' }, att.content_type === 'application/pdf' ? '📄' : '📎');
+      : el(
+          'span',
+          { class: 'attach-icon' },
+          att.content_type === 'application/pdf' ? '📄' : '📎',
+        );
 
     return el(
       'div',
       { class: 'attachment' },
       el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, preview),
-      el('a', { href, class: 'attach-name', target: '_blank', rel: 'noopener noreferrer' }, att.filename),
+      el(
+        'a',
+        {
+          href,
+          class: 'attach-name',
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        },
+        att.filename,
+      ),
       el('span', { class: 'attach-size muted' }, formatBytes(att.size)),
       el(
         'button',
         {
           class: 'btn btn-ghost btn-sm delete',
           onclick: guard(async () => {
-            await api(`/tickets/${id}/attachments/${att.id}`, { method: 'DELETE' });
+            await api(`/tickets/${id}/attachments/${att.id}`, {
+              method: 'DELETE',
+            });
             render();
           }),
         },
@@ -1093,9 +1522,16 @@ function attachmentsCard(ticket, id) {
       'div',
       { style: 'margin-top: 10px' },
       fileInput,
-      el('button', { class: 'btn btn-sm', onclick: () => fileInput.click() }, 'Add file'),
-      el('span', { class: 'muted', style: 'margin-left: 8px; font-size: 12px' },
-        'images, PDF, or text · 1 MB max'),
+      el(
+        'button',
+        { class: 'btn btn-sm', onclick: () => fileInput.click() },
+        'Add file',
+      ),
+      el(
+        'span',
+        { class: 'muted', style: 'margin-left: 8px; font-size: 12px' },
+        'images, PDF, or text · 1 MB max',
+      ),
     ),
   );
 }
@@ -1114,18 +1550,30 @@ function ticketSidebar(ticket, devices, patch, id) {
   return el(
     'aside',
     { class: 'card' },
-    taskActions(ticket),
-    block('List', select('queue', TICKET_QUEUES, ticket.queue, (e) => patch({ queue: e.target.value }))),
+    taskActions(ticket, false),
+    block(
+      'List',
+      select('queue', TICKET_QUEUES, ticket.queue, (e) =>
+        patch({ queue: e.target.value }),
+      ),
+    ),
     block(
       'Status',
       select('status', TICKET_STATUSES, ticket.status, (e) => {
-        const reopening = !ticket.is_open && !['resolved', 'closed'].includes(e.target.value);
-        patch(reopening ? { status: e.target.value, queue: 'next' } : { status: e.target.value });
+        const reopening =
+          !ticket.is_open && !['resolved', 'closed'].includes(e.target.value);
+        patch(
+          reopening
+            ? { status: e.target.value, queue: 'next' }
+            : { status: e.target.value },
+        );
       }),
     ),
     block(
       'Priority',
-      select('priority', PRIORITIES, ticket.priority, (e) => patch({ priority: e.target.value })),
+      select('priority', PRIORITIES, ticket.priority, (e) =>
+        patch({ priority: e.target.value }),
+      ),
     ),
     block(
       'Device',
@@ -1149,13 +1597,18 @@ function ticketSidebar(ticket, devices, patch, id) {
       { class: 'sidebar-block muted', style: 'font-size: 12px' },
       el('div', {}, `Created ${relativeTime(ticket.created_at)}`),
       el('div', {}, `Updated ${relativeTime(ticket.updated_at)}`),
-      ticket.resolved_at && el('div', {}, `Resolved ${relativeTime(ticket.resolved_at)}`),
+      ticket.resolved_at &&
+        el('div', {}, `Resolved ${relativeTime(ticket.resolved_at)}`),
       ticket.schedule_id &&
         el(
           'div',
           {},
           'From ',
-          el('a', { href: `#/schedules/${ticket.schedule_id}` }, 'a maintenance schedule'),
+          el(
+            'a',
+            { href: `#/schedules/${ticket.schedule_id}` },
+            'a maintenance schedule',
+          ),
         ),
     ),
     el(
@@ -1177,117 +1630,14 @@ function ticketSidebar(ticket, devices, patch, id) {
 
 /* ---- Ticket modals ------------------------------------------------------ */
 
-async function newTicketModal(presetDeviceId) {
-  const devices = await api('/devices').catch(() => []);
-  let savedTicket;
-  const files = [];
-  const taskFields = el('fieldset', { class: 'capture-fields' });
-  const fileList = el('ul', { class: 'capture-files', 'aria-label': 'Selected files' });
-  const uploadStatus = el('p', { class: 'capture-upload-status', role: 'status', 'aria-live': 'polite' });
-  const fileInput = el('input', {
-    type: 'file', multiple: true, hidden: true,
-    accept: Object.keys(ATTACHMENT_TYPES).map((ext) => `.${ext}`).join(','),
-    'aria-label': 'Choose attachments',
-  });
-  const drawFiles = () => fileList.replaceChildren(...files.map((entry) => el(
-    'li', {},
-    el('span', {}, entry.file.name, el('small', { class: entry.error ? 'capture-file-error' : 'muted' },
-      `${formatBytes(entry.file.size)} · ${entry.error || (entry.uploaded ? 'Uploaded' : 'Ready to upload')}`)),
-    !entry.uploaded && el('button', {
-      type: 'button', class: 'btn btn-sm', 'aria-label': `Remove ${entry.file.name}`,
-      onclick: () => { files.splice(files.indexOf(entry), 1); drawFiles(); },
-    }, 'Remove'),
-  )));
-  fileInput.addEventListener('change', () => {
-    for (const file of fileInput.files) files.push({ file, error: attachmentError(file), uploaded: false });
-    fileInput.value = '';
-    drawFiles();
-  });
-  const attachmentFields = el('fieldset', { class: 'capture-fields capture-attachments' },
-    el('legend', {}, 'Attachments (optional)'),
-    fileInput,
-    el('button', { type: 'button', class: 'btn btn-sm', onclick: () => fileInput.click() }, 'Add files'),
-    el('p', { class: 'muted capture-file-help' }, 'PNG, JPG, GIF, WebP, PDF, or text · 1 MB per file'),
-    fileList,
-  );
-
-  openModal(
-    'Add task',
-    () => {
-      taskFields.append(
-        field('Title', el('input', { name: 'title', required: true, maxlength: 200, placeholder: 'What do you want to remember?' })),
-        el('p', { class: 'muted' }, 'Saved to Inbox. You can sort it out later.'),
-        el('details', { class: 'capture-details' },
-          el('summary', {}, 'Optional details'),
-          field(
-            'Notes',
-            el('textarea', { name: 'body', placeholder: 'Any context, ideas, or next steps…' }),
-          ),
-          el(
-            'div',
-            { class: 'field-row' },
-            field('Priority', select('priority', PRIORITIES, 'medium')),
-            field(
-              'Device',
-              select(
-                'device_id',
-                [['', '— none —'], ...devices.map((d) => [d.id, d.name])],
-                presetDeviceId ?? '',
-              ),
-            ),
-          ),
-          el(
-            'div',
-            { class: 'field-row' },
-            field('Due date', el('input', { name: 'due_date', type: 'date' })),
-            field('Tags', el('input', { name: 'tags', placeholder: 'home, tech, personal' })),
-          ),
-        ),
-      );
-      return el('div', {}, taskFields, attachmentFields, uploadStatus);
-    },
-    async (data, form) => {
-      const invalid = files.find((entry) => attachmentError(entry.file));
-      if (invalid) throw new Error(`${invalid.file.name}: ${attachmentError(invalid.file)}. Remove it or choose another file.`);
-
-      // Keep the created ID while this dialog is open: upload retries must not
-      // recreate the task or repeat uploads that already succeeded.
-      if (!savedTicket) savedTicket = await api('/tickets', {
-        method: 'POST',
-        body: {
-          title: data.title,
-          queue: 'inbox',
-          body: data.body,
-          priority: data.priority,
-          device_id: data.device_id || null,
-          due_date: data.due_date || null,
-          tags: parseTags(data.tags),
-        },
-      });
-      taskFields.disabled = true;
-      form.querySelector('[type="submit"]').dataset.idleLabel = 'Retry uploads';
-      form.querySelector('.modal-actions [type="button"]').textContent = 'Close';
-      attachmentFields.disabled = true;
-      try {
-        for (const entry of files.filter((item) => !item.uploaded)) {
-          uploadStatus.textContent = `Task saved to Inbox. Uploading ${entry.file.name}…`;
-          try {
-            await uploadAttachment(savedTicket.id, entry.file);
-            entry.uploaded = true;
-            entry.error = '';
-          } catch (err) {
-            entry.error = err.message;
-            uploadStatus.textContent = 'Your task is saved. Some files are not attached yet. Retry uploads, remove the remaining files, or close and attach them from the task later.';
-            throw new Error(`Task saved, but ${entry.file.name} did not upload: ${err.message}`);
-          } finally { drawFiles(); }
-        }
-      } finally {
-        attachmentFields.disabled = false;
-        await render();
-      }
-      toast(`Saved to Inbox: ${savedTicket.title}`);
-    },
-  );
+function newTicketModal(presetDeviceId) {
+  if (pendingCaptureHash) {
+    toast('Please wait for this capture to finish saving.');
+    return;
+  }
+  location.href =
+    '/capture.html#/capture' +
+    (presetDeviceId ? '?device_id=' + presetDeviceId : '');
 }
 
 function editTicketModal(ticket, patch) {
@@ -1297,14 +1647,22 @@ function editTicketModal(ticket, patch) {
       el(
         'div',
         {},
-        field('Title', el('input', { name: 'title', required: true, value: ticket.title })),
+        field(
+          'Title',
+          el('input', { name: 'title', required: true, value: ticket.title }),
+        ),
         field('Description', el('textarea', { name: 'body' }, ticket.body)),
         field(
           'Tags',
-          el('input', { name: 'tags', value: ticket.tags.join(', '), placeholder: 'disk, backup' }),
+          el('input', {
+            name: 'tags',
+            value: ticket.tags.join(', '),
+            placeholder: 'disk, backup',
+          }),
         ),
       ),
-    (data) => patch({ title: data.title, body: data.body, tags: parseTags(data.tags) }),
+    (data) =>
+      patch({ title: data.title, body: data.body, tags: parseTags(data.tags) }),
   );
 }
 
@@ -1321,7 +1679,11 @@ async function renderDevices(view, query) {
     location.hash = `#/devices${next.toString() ? `?${next}` : ''}`;
   };
 
-  const search = searchBox('Search name, hostname, IP, location…', query.q, (q) => update('q', q));
+  const search = searchBox(
+    'Search name, hostname, IP, location…',
+    query.q,
+    (q) => update('q', q),
+  );
 
   view.append(
     el(
@@ -1338,7 +1700,11 @@ async function renderDevices(view, query) {
           exportLinks('devices'),
         ),
       ),
-      el('button', { class: 'btn btn-primary', onclick: () => deviceModal() }, 'Add device'),
+      el(
+        'button',
+        { class: 'btn btn-primary', onclick: () => deviceModal() },
+        'Add device',
+      ),
     ),
     el(
       'div',
@@ -1380,7 +1746,9 @@ function deviceCard(device) {
     'div',
     {
       class: 'device-card',
-      onclick: () => { location.hash = `#/devices/${device.id}`; },
+      onclick: () => {
+        location.hash = `#/devices/${device.id}`;
+      },
     },
     el(
       'div',
@@ -1403,7 +1771,10 @@ function deviceCard(device) {
       el(
         'dl',
         {},
-        ...rows.flatMap(([key, value]) => [el('dt', {}, key), el('dd', {}, value)]),
+        ...rows.flatMap(([key, value]) => [
+          el('dt', {}, key),
+          el('dd', {}, value),
+        ]),
       ),
   );
 }
@@ -1451,7 +1822,11 @@ async function renderDeviceDetail(view, id) {
               { class: 'btn btn-sm', onclick: () => newTicketModal(device.id) },
               'Add task',
             ),
-            el('button', { class: 'btn btn-sm', onclick: () => deviceModal(device) }, 'Edit'),
+            el(
+              'button',
+              { class: 'btn btn-sm', onclick: () => deviceModal(device) },
+              'Edit',
+            ),
           ),
         ),
         topologyCard(device),
@@ -1461,7 +1836,11 @@ async function renderDeviceDetail(view, id) {
           el('h2', {}, `Open tasks (${open.length})`),
           open.length === 0
             ? el('p', { class: 'muted' }, 'Nothing open against this device.')
-            : el('div', { class: 'ticket-list' }, ...open.map((t) => ticketRow(t))),
+            : el(
+                'div',
+                { class: 'ticket-list' },
+                ...open.map((t) => ticketRow(t)),
+              ),
         ),
         el(
           'section',
@@ -1480,7 +1859,9 @@ async function renderDeviceDetail(view, id) {
                     el(
                       'span',
                       { class: 'meta' },
-                      t.resolved_at ? relativeTime(t.resolved_at) : label(t.status),
+                      t.resolved_at
+                        ? relativeTime(t.resolved_at)
+                        : label(t.status),
                     ),
                   ),
                 ),
@@ -1493,7 +1874,10 @@ async function renderDeviceDetail(view, id) {
         el('h2', {}, 'Details'),
         el(
           'dl',
-          { style: 'margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px' },
+          {
+            style:
+              'margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px',
+          },
           ...rows.flatMap(([key, value]) => [
             el('dt', { class: 'muted' }, key),
             el('dd', { style: 'margin: 0; overflow-wrap: anywhere' }, value),
@@ -1504,7 +1888,11 @@ async function renderDeviceDetail(view, id) {
             'div',
             { style: 'margin-top: 14px' },
             el('label', {}, 'Notes'),
-            el('div', { class: 'prose', style: 'font-size: 13px' }, renderMarkdown(device.notes)),
+            el(
+              'div',
+              { class: 'prose', style: 'font-size: 13px' },
+              renderMarkdown(device.notes),
+            ),
           ),
         el(
           'button',
@@ -1551,7 +1939,11 @@ function topologyCard(device) {
       el(
         'div',
         {},
-        el('label', {}, `Used by ${dependents.length} device${dependents.length === 1 ? '' : 's'}`),
+        el(
+          'label',
+          {},
+          `Used by ${dependents.length} device${dependents.length === 1 ? '' : 's'}`,
+        ),
         el(
           'ul',
           { class: 'mini-list' },
@@ -1576,7 +1968,9 @@ async function deviceModal(device) {
   const editing = Boolean(device);
   // The parent picker needs the roster; exclude the device itself so it cannot
   // be set as its own parent from the dropdown.
-  const devices = (await api('/devices').catch(() => [])).filter((d) => d.id !== device?.id);
+  const devices = (await api('/devices').catch(() => [])).filter(
+    (d) => d.id !== device?.id,
+  );
 
   openModal(
     editing ? `Edit ${device.name}` : 'Add device',
@@ -1586,33 +1980,60 @@ async function deviceModal(device) {
         {},
         field(
           'Name',
-          el('input', { name: 'name', required: true, value: device?.name ?? '', placeholder: 'nas-01' }),
+          el('input', {
+            name: 'name',
+            required: true,
+            value: device?.name ?? '',
+            placeholder: 'nas-01',
+          }),
         ),
         el(
           'div',
           { class: 'field-row' },
           field('Type', select('type', DEVICE_TYPES, device?.type ?? 'server')),
-          field('Status', select('status', DEVICE_STATUSES, device?.status ?? 'active')),
+          field(
+            'Status',
+            select('status', DEVICE_STATUSES, device?.status ?? 'active'),
+          ),
         ),
         el(
           'div',
           { class: 'field-row' },
           field(
             'Hostname',
-            el('input', { name: 'hostname', value: device?.hostname ?? '', placeholder: 'nas-01.lan' }),
+            el('input', {
+              name: 'hostname',
+              value: device?.hostname ?? '',
+              placeholder: 'nas-01.lan',
+            }),
           ),
           field(
             'IP address',
-            el('input', { name: 'ip_address', value: device?.ip_address ?? '', placeholder: '10.0.0.20' }),
+            el('input', {
+              name: 'ip_address',
+              value: device?.ip_address ?? '',
+              placeholder: '10.0.0.20',
+            }),
           ),
         ),
         el(
           'div',
           { class: 'field-row' },
-          field('OS', el('input', { name: 'os', value: device?.os ?? '', placeholder: 'TrueNAS 24' })),
+          field(
+            'OS',
+            el('input', {
+              name: 'os',
+              value: device?.os ?? '',
+              placeholder: 'TrueNAS 24',
+            }),
+          ),
           field(
             'Location',
-            el('input', { name: 'location', value: device?.location ?? '', placeholder: 'Rack, shelf 2' }),
+            el('input', {
+              name: 'location',
+              value: device?.location ?? '',
+              placeholder: 'Rack, shelf 2',
+            }),
           ),
         ),
         el(
@@ -1620,7 +2041,11 @@ async function deviceModal(device) {
           { class: 'field-row' },
           field(
             'Serial number',
-            el('input', { name: 'serial_number', value: device?.serial_number ?? '', placeholder: 'For the RMA' }),
+            el('input', {
+              name: 'serial_number',
+              value: device?.serial_number ?? '',
+              placeholder: 'For the RMA',
+            }),
           ),
           field(
             'Cost',
@@ -1639,11 +2064,19 @@ async function deviceModal(device) {
           { class: 'field-row' },
           field(
             'Purchase date',
-            el('input', { name: 'purchase_date', type: 'date', value: device?.purchase_date ?? '' }),
+            el('input', {
+              name: 'purchase_date',
+              type: 'date',
+              value: device?.purchase_date ?? '',
+            }),
           ),
           field(
             'Warranty expires',
-            el('input', { name: 'warranty_expires', type: 'date', value: device?.warranty_expires ?? '' }),
+            el('input', {
+              name: 'warranty_expires',
+              type: 'date',
+              value: device?.warranty_expires ?? '',
+            }),
           ),
         ),
         field(
@@ -1723,7 +2156,16 @@ async function renderSchedules(view, query) {
         'div',
         { style: 'display: flex; gap: 8px' },
         el('button', { class: 'btn', onclick: runDue }, 'Run due now'),
-        el('button', { class: 'btn btn-primary', onclick: () => scheduleModal(null, devices) }, 'New schedule'),
+        el(
+          'button',
+          { class: 'btn btn-primary', onclick: guard(() => recurrenceModal()) },
+          'New routine',
+        ),
+        el(
+          'button',
+          { class: 'btn btn-sm', onclick: () => scheduleModal(null, devices) },
+          'Legacy interval schedule',
+        ),
       ),
     ),
     el(
@@ -1731,7 +2173,11 @@ async function renderSchedules(view, query) {
       { class: 'filters' },
       select(
         'paused',
-        [['', 'All schedules'], ['false', 'Active'], ['true', 'Paused']],
+        [
+          ['', 'All schedules'],
+          ['false', 'Active'],
+          ['true', 'Paused'],
+        ],
         query.paused,
         (e) => update('paused', e.target.value),
       ),
@@ -1749,7 +2195,11 @@ async function renderSchedules(view, query) {
           el('strong', {}, 'No schedules yet'),
           'Filter changes, cert renewals, battery swaps — the work you only remember once it has already gone wrong.',
         )
-      : el('div', { class: 'ticket-list' }, ...schedules.map((s) => scheduleRow(s, devices))),
+      : el(
+          'div',
+          { class: 'ticket-list' },
+          ...schedules.map((s) => scheduleRow(s, devices)),
+        ),
   );
 }
 
@@ -1771,7 +2221,9 @@ function scheduleRow(schedule, devices) {
     {
       class: `ticket-row${schedule.paused ? ' done' : ''}`,
       style: `--prio: var(--${schedule.priority})`,
-      onclick: () => { location.hash = `#/schedules/${schedule.id}`; },
+      onclick: () => {
+        location.hash = `#/schedules/${schedule.id}`;
+      },
     },
     el(
       'div',
@@ -1781,7 +2233,7 @@ function scheduleRow(schedule, devices) {
         'div',
         { class: 'sub' },
         el('span', { class: 'id' }, `#${schedule.id}`),
-        el('span', { class: 'badge plain' }, cadence(schedule.interval_days)),
+        el('span', { class: 'badge plain' }, recurrenceLabel(schedule)),
         priorityBadge(schedule.priority),
         schedule.device_name && el('span', {}, `· ${schedule.device_name}`),
         el(
@@ -1801,16 +2253,30 @@ function scheduleRow(schedule, devices) {
 }
 
 async function renderScheduleDetail(view, id) {
-  const [schedule, devices] = await Promise.all([api(`/schedules/${id}`), api('/devices')]);
+  const [schedule, devices] = await Promise.all([
+    api(`/schedules/${id}`),
+    api('/devices'),
+  ]);
 
   const rows = [
-    ['Cadence', cadence(schedule.interval_days)],
+    ['Cadence', recurrenceLabel(schedule)],
     ['Next due', schedule.next_due],
-    ['Status', schedule.paused ? 'Paused' : dueDescription(schedule.due_in_days)],
-    ['Opens early', schedule.lead_days > 0 ? `${schedule.lead_days} days ahead` : 'on the due date'],
+    [
+      'Status',
+      schedule.paused ? 'Paused' : dueDescription(schedule.due_in_days),
+    ],
+    [
+      'Opens early',
+      schedule.lead_days > 0
+        ? `${schedule.lead_days} days ahead`
+        : 'on the due date',
+    ],
     ['Device', schedule.device_name],
     ['Priority', label(schedule.priority)],
-    ['Last run', schedule.last_run_at ? relativeTime(schedule.last_run_at) : 'never'],
+    [
+      'Last run',
+      schedule.last_run_at ? relativeTime(schedule.last_run_at) : 'never',
+    ],
   ].filter(([, value]) => value);
 
   view.append(
@@ -1830,7 +2296,10 @@ async function renderScheduleDetail(view, id) {
             { style: 'display: flex; gap: 8px' },
             el(
               'button',
-              { class: 'btn btn-sm', onclick: () => scheduleModal(schedule, devices) },
+              {
+                class: 'btn btn-sm',
+                onclick: () => scheduleModal(schedule, devices),
+              },
               'Edit',
             ),
           ),
@@ -1843,8 +2312,11 @@ async function renderScheduleDetail(view, id) {
             ? prose(schedule.body)
             : el('div', { class: 'prose empty' }, 'No description.'),
           schedule.tags.length > 0 &&
-            el('div', { class: 'badges', style: 'margin-top: 10px' },
-              ...schedule.tags.map((tag) => el('span', { class: 'tag' }, tag))),
+            el(
+              'div',
+              { class: 'badges', style: 'margin-top: 10px' },
+              ...schedule.tags.map((tag) => el('span', { class: 'tag' }, tag)),
+            ),
         ),
         el(
           'section',
@@ -1876,7 +2348,10 @@ async function renderScheduleDetail(view, id) {
         el('h2', {}, 'Details'),
         el(
           'dl',
-          { style: 'margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px' },
+          {
+            style:
+              'margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12.5px',
+          },
           ...rows.flatMap(([key, value]) => [
             el('dt', { class: 'muted' }, key),
             el('dd', { style: 'margin: 0; overflow-wrap: anywhere' }, value),
@@ -1888,7 +2363,10 @@ async function renderScheduleDetail(view, id) {
             class: 'btn btn-sm',
             style: 'width: 100%; margin-top: 16px',
             onclick: guard(async () => {
-              await api(`/schedules/${id}`, { method: 'PATCH', body: { paused: !schedule.paused } });
+              await api(`/schedules/${id}`, {
+                method: 'PATCH',
+                body: { paused: !schedule.paused },
+              });
               render();
             }),
           },
@@ -1917,6 +2395,7 @@ async function renderScheduleDetail(view, id) {
 }
 
 function scheduleModal(schedule, devices) {
+  if (schedule?.recurrence) return recurrenceModal(null, schedule);
   const editing = Boolean(schedule);
 
   openModal(
@@ -1936,7 +2415,11 @@ function scheduleModal(schedule, devices) {
         ),
         field(
           'Description',
-          el('textarea', { name: 'body', placeholder: 'What the job involves…' }, schedule?.body ?? ''),
+          el(
+            'textarea',
+            { name: 'body', placeholder: 'What the job involves…' },
+            schedule?.body ?? '',
+          ),
         ),
         el(
           'div',
@@ -1971,10 +2454,14 @@ function scheduleModal(schedule, devices) {
             el('input', {
               name: 'next_due',
               type: 'date',
-              value: schedule?.next_due ?? new Date().toISOString().slice(0, 10),
+              value:
+                schedule?.next_due ?? new Date().toISOString().slice(0, 10),
             }),
           ),
-          field('Priority', select('priority', PRIORITIES, schedule?.priority ?? 'medium')),
+          field(
+            'Priority',
+            select('priority', PRIORITIES, schedule?.priority ?? 'medium'),
+          ),
         ),
         el(
           'div',
@@ -2043,7 +2530,10 @@ function calendarLink() {
     '· ',
     el(
       'a',
-      { href: '/api/calendar.ics', title: 'Subscribe from a calendar app using ?token=API_TOKEN' },
+      {
+        href: '/api/calendar.ics',
+        title: 'Subscribe from a calendar app using ?token=API_TOKEN',
+      },
       'calendar feed',
     ),
   );
@@ -2063,7 +2553,13 @@ const SHORTCUTS = [
   ['Esc', 'Close dialog'],
 ];
 
-const GO_TO = { d: '#/dashboard', t: '#/all', i: '#/', v: '#/devices', s: '#/schedules' };
+const GO_TO = {
+  d: '#/dashboard',
+  t: '#/all',
+  i: '#/',
+  v: '#/devices',
+  s: '#/schedules',
+};
 
 /** True while focus is somewhere that swallows plain keystrokes. */
 function isTyping() {
@@ -2076,8 +2572,13 @@ function isTyping() {
 
 function showShortcuts() {
   const root = document.getElementById('modal-root');
-  const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    root.innerHTML = '';
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+  };
 
   const panel = el(
     'div',
@@ -2087,19 +2588,33 @@ function showShortcuts() {
       'dl',
       { class: 'shortcut-list' },
       ...SHORTCUTS.flatMap(([keys, description]) => [
-        el('dt', {}, ...keys.split(' then ').flatMap((key, i) => (i === 0 ? [el('kbd', {}, key)] : [' then ', el('kbd', {}, key)]))),
+        el(
+          'dt',
+          {},
+          ...keys
+            .split(' then ')
+            .flatMap((key, i) =>
+              i === 0 ? [el('kbd', {}, key)] : [' then ', el('kbd', {}, key)],
+            ),
+        ),
         el('dd', {}, description),
       ]),
     ),
     el(
       'div',
       { class: 'modal-actions' },
-      el('button', { type: 'button', class: 'btn btn-primary', onclick: close }, 'Close'),
+      el(
+        'button',
+        { type: 'button', class: 'btn btn-primary', onclick: close },
+        'Close',
+      ),
     ),
   );
 
   const backdrop = el('div', { class: 'modal-backdrop' }, panel);
-  backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) close(); });
+  backdrop.addEventListener('mousedown', (e) => {
+    if (e.target === backdrop) close();
+  });
   document.addEventListener('keydown', onKey);
 
   root.innerHTML = '';
@@ -2113,7 +2628,14 @@ function installShortcuts() {
   document.addEventListener('keydown', (event) => {
     // Modifier combinations belong to the browser, and anything typed into a
     // field is text rather than a command.
-    if (event.metaKey || event.ctrlKey || event.altKey || isTyping() || document.getElementById('modal-root').childElementCount) return;
+    if (
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      isTyping() ||
+      document.getElementById('modal-root').childElementCount
+    )
+      return;
 
     if (awaitingGo) {
       clearTimeout(goTimer);
@@ -2130,7 +2652,9 @@ function installShortcuts() {
       case 'g':
         awaitingGo = true;
         // A stranded 'g' should not silently capture the next keystroke.
-        goTimer = setTimeout(() => { awaitingGo = false; }, 1500);
+        goTimer = setTimeout(() => {
+          awaitingGo = false;
+        }, 1500);
         break;
       case 'n':
         event.preventDefault();
@@ -2158,9 +2682,15 @@ function installShortcuts() {
 /* ---- Router ------------------------------------------------------------- */
 
 const ROUTES = [
+  ...captureRoutes,
+  ...planningRoutes,
   [/^\/?$/, (view, query) => renderTickets(view, query, 'inbox'), 'inbox'],
   [/^\/next$/, (view, query) => renderTickets(view, query, 'next'), 'next'],
-  [/^\/someday$/, (view, query) => renderTickets(view, query, 'someday'), 'someday'],
+  [
+    /^\/someday$/,
+    (view, query) => renderTickets(view, query, 'someday'),
+    'someday',
+  ],
   [/^\/done$/, (view, query) => renderTickets(view, query, 'done'), 'done'],
   [/^\/all$/, (view, query) => renderTickets(view, query, 'all'), 'all'],
   [/^\/dashboard$/, renderDashboard, 'dashboard'],
@@ -2181,9 +2711,11 @@ async function render() {
   const query = Object.fromEntries(new URLSearchParams(queryString));
 
   const view = document.getElementById('view');
-  const match = ROUTES.map(([re, handler, tab]) => [re.exec(path), handler, tab]).find(
-    ([result]) => result,
-  );
+  const match = ROUTES.map(([re, handler, tab]) => [
+    re.exec(path),
+    handler,
+    tab,
+  ]).find(([result]) => result);
 
   for (const link of document.querySelectorAll('nav [data-tab]')) {
     link.classList.toggle('active', link.dataset.tab === (match?.[2] ?? ''));
@@ -2193,9 +2725,15 @@ async function render() {
   next.id = 'view';
 
   try {
+    if (!['capture', 'drafts'].includes(match?.[2])) await refreshPlanning();
     if (!match) {
       next.append(
-        el('div', { class: 'empty-state' }, el('strong', {}, 'Page not found'), raw),
+        el(
+          'div',
+          { class: 'empty-state' },
+          el('strong', {}, 'Page not found'),
+          raw,
+        ),
       );
     } else {
       const [result, handler] = match;
@@ -2204,7 +2742,12 @@ async function render() {
     }
   } catch (err) {
     next.append(
-      el('div', { class: 'empty-state' }, el('strong', {}, 'Could not load'), err.message),
+      el(
+        'div',
+        { class: 'empty-state' },
+        el('strong', {}, 'Could not load'),
+        err.message,
+      ),
     );
   }
 
@@ -2219,7 +2762,9 @@ async function render() {
 /** Reveals the sign-out control only when a password is actually in force. */
 async function initSession() {
   const button = document.getElementById('sign-out');
-  const session = await api('/auth/session').catch(() => null);
+  const session = await fetch('/api/auth/session')
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
   if (!session?.enabled) return;
 
   button.hidden = false;
@@ -2227,14 +2772,71 @@ async function initSession() {
     'click',
     guard(async () => {
       await api('/auth/logout', { method: 'POST' });
+      if (
+        confirm(
+          'Also clear drafts stored on this device? Choose Cancel to keep them.',
+        )
+      )
+        await clearDrafts();
       location.replace('/login');
     }),
   );
 }
 
-window.addEventListener('hashchange', render);
-document.getElementById('new-ticket').addEventListener('click', () => newTicketModal());
+window.addEventListener('hashchange', () => {
+  if (pendingCaptureHash) {
+    history.replaceState(
+      null,
+      '',
+      location.pathname + location.search + pendingCaptureHash,
+    );
+    toast('Please wait for this capture to finish saving.');
+    return;
+  }
+  render();
+});
+setupPlanning({
+  el,
+  api,
+  guard,
+  field,
+  select,
+  openModal,
+  render,
+  toast,
+  ticketRow,
+  prose,
+});
+setupCapture({ el, api, guard, field, select, render });
+if (
+  document.body.dataset.captureShell &&
+  !/^#\/(capture|drafts)(\?|$)/.test(location.hash)
+)
+  history.replaceState(null, '', location.pathname + '#/capture');
+if ('serviceWorker' in navigator)
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+document
+  .getElementById('new-ticket')
+  .addEventListener('click', () => newTicketModal());
 document.getElementById('shortcuts').addEventListener('click', showShortcuts);
 installShortcuts();
 initSession();
 render();
+// A page left open overnight should resurface dated work without interrupting edits.
+async function refreshDay() {
+  if (
+    document.visibilityState !== 'visible' ||
+    /^#\/(capture|drafts)/.test(location.hash) ||
+    document.querySelector('#modal-root form') ||
+    document.activeElement?.matches('input, textarea, select')
+  )
+    return;
+  try {
+    const res = await fetch('/api/planning');
+    if (res.ok && (await res.json()).today !== planningDate) await render();
+  } catch {
+    /* The next focus or timer tick retries when connected. */
+  }
+}
+setInterval(refreshDay, 60_000);
+document.addEventListener('visibilitychange', refreshDay);

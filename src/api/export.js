@@ -2,7 +2,14 @@ import { CLOSED_STATUSES, TICKET_STATUSES, oneOf } from '../validate.js';
 
 const CLOSED_LIST = CLOSED_STATUSES.map((s) => `'${s}'`).join(', ');
 
-export const EXPORT_ENTITIES = ['tickets', 'devices', 'schedules'];
+export const EXPORT_ENTITIES = [
+  'tickets',
+  'devices',
+  'schedules',
+  'projects',
+  'views',
+  'checklists',
+];
 export const EXPORT_FORMATS = ['json', 'csv'];
 
 /**
@@ -11,18 +18,63 @@ export const EXPORT_FORMATS = ['json', 'csv'];
  */
 const COLUMNS = {
   tickets: [
-    'id', 'title', 'status', 'priority', 'device', 'tags', 'due_date',
-    'created_at', 'updated_at', 'resolved_at', 'comments', 'body', 'queue',
+    'id',
+    'title',
+    'status',
+    'priority',
+    'device',
+    'tags',
+    'due_date',
+    'created_at',
+    'updated_at',
+    'resolved_at',
+    'comments',
+    'body',
+    'queue',
+    'project_id',
+    'today_rank',
+    'snoozed_until',
+    'waiting_on',
+    'follow_up_date',
   ],
   devices: [
-    'id', 'name', 'type', 'status', 'hostname', 'ip_address', 'os',
-    'location', 'serial_number', 'purchase_date', 'warranty_expires', 'cost',
-    'depends_on', 'open_tickets', 'created_at', 'notes',
+    'id',
+    'name',
+    'type',
+    'status',
+    'hostname',
+    'ip_address',
+    'os',
+    'location',
+    'serial_number',
+    'purchase_date',
+    'warranty_expires',
+    'cost',
+    'depends_on',
+    'open_tickets',
+    'created_at',
+    'notes',
   ],
   schedules: [
-    'id', 'title', 'priority', 'device', 'tags', 'interval_days', 'lead_days',
-    'next_due', 'paused', 'last_run_at', 'body',
+    'id',
+    'title',
+    'priority',
+    'device',
+    'tags',
+    'interval_days',
+    'lead_days',
+    'next_due',
+    'paused',
+    'last_run_at',
+    'body',
+    'recurrence',
+    'project_id',
+    'checklist',
+    'time_zone',
   ],
+  projects: ['id', 'name', 'notes', 'archived', 'created_at'],
+  views: ['id', 'name', 'filters', 'position'],
+  checklists: ['id', 'ticket_id', 'title', 'completed', 'position'],
 };
 
 const QUERIES = {
@@ -33,7 +85,7 @@ const QUERIES = {
               JOIN tags tg ON tg.id = tt.tag_id WHERE tt.ticket_id = t.id) AS tags,
            t.due_date, t.created_at, t.updated_at, t.resolved_at,
            (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id) AS comments,
-           t.body, t.queue
+           t.body, t.queue, t.project_id, t.today_rank, t.snoozed_until, t.waiting_on, t.follow_up_date
       FROM tickets t
       LEFT JOIN devices d ON d.id = t.device_id`,
 
@@ -50,15 +102,22 @@ const QUERIES = {
   schedules: `
     SELECT s.id, s.title, s.priority,
            d.name AS device,
-           s.tags, s.interval_days, s.lead_days, s.next_due, s.paused, s.last_run_at, s.body
+           s.tags, s.interval_days, s.lead_days, s.next_due, s.paused, s.last_run_at, s.body,
+           s.recurrence, s.project_id, s.checklist, s.time_zone
       FROM schedules s
       LEFT JOIN devices d ON d.id = s.device_id`,
+  projects: 'SELECT * FROM projects',
+  views: 'SELECT * FROM saved_views',
+  checklists: 'SELECT * FROM checklist_items',
 };
 
 const ORDER = {
   tickets: 'ORDER BY t.id ASC',
   devices: 'ORDER BY d.id ASC',
   schedules: 'ORDER BY s.id ASC',
+  projects: 'ORDER BY id',
+  views: 'ORDER BY position,id',
+  checklists: 'ORDER BY ticket_id,position,id',
 };
 
 /**
@@ -71,9 +130,10 @@ export function exportEntity(db, query = {}) {
 
   // Tickets default to everything, including closed — an export is an archive,
   // not the working list, so silently dropping resolved history would be wrong.
-  const where = entity === 'tickets' && query.status && query.status !== 'all'
-    ? `WHERE t.status = ${quoteStatus(query.status)}`
-    : '';
+  const where =
+    entity === 'tickets' && query.status && query.status !== 'all'
+      ? `WHERE t.status = ${quoteStatus(query.status)}`
+      : '';
 
   const rows = db.prepare(`${QUERIES[entity]} ${where} ${ORDER[entity]}`).all();
   const stamp = new Date().toISOString().slice(0, 10);

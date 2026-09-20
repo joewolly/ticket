@@ -17,6 +17,7 @@ services:
     # out of authentication deliberately with AUTH_DISABLED=true.
     environment:
       TZ: ${TZ:-UTC}
+      APP_TIME_ZONE: ${APP_TIME_ZONE:-America/Denver}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       AUTH_DISABLED: ${AUTH_DISABLED:-}
       API_TOKEN: ${API_TOKEN:-}

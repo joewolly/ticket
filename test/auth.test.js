@@ -184,9 +184,14 @@ test('redirects unauthenticated page requests to the login page', async () => {
   });
 });
 
-test('does not serve the app bundle to an anonymous visitor', async () => {
+test('serves static capture assets anonymously but protects all server task data', async () => {
   await withServer(enabled, async ({ request }) => {
-    assert.equal((await request('GET', '/app.js')).status, 302);
+    for (const path of ['/app.js', '/capture.html', '/planning.js', '/capture.js', '/draft-store.js', '/sw.js', '/manifest.webmanifest', '/apple-touch-icon.png']) {
+      assert.equal((await request('GET', path)).status, 200, path);
+    }
+    for (const path of ['/api/tickets', '/api/projects', '/api/views', '/api/planning']) {
+      assert.equal((await request('GET', path)).status, 401, path);
+    }
   });
 });
 

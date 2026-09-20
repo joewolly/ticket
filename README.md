@@ -70,7 +70,30 @@ automatically generated maintenance/warranty tasks also default to Next.
 Only Next tasks can become **stale** after 14 days. An explicit deadline is
 still honored in every queue, including Inbox and Someday.
 
-The app requires a connection to the server. It does not queue offline edits.
+Existing tasks require a connection to the server. New capture drafts and their
+attachments can be saved on the device while offline and submitted explicitly
+after reconnecting. Drafts are not included in server backups.
+
+## Daily planning
+
+- **Today** is your ordered focus list. Selections stay until completed or
+  removed; choosing Today moves a task to Next without changing its deadline.
+- **Snooze** hides a task until tomorrow, next Monday, or a chosen date. It
+  remains searchable, and an explicit deadline still produces reminders.
+- **Waiting** records a person, delivery, or other blocker with an optional
+  follow-up date. Due follow-ups return to your working list.
+- **Checklists** turn a task into concrete steps, with completion counts in
+  lists. Finishing the checklist does not automatically finish the task.
+- **Projects** collect tasks and Markdown notes, show progress, and identify
+  the highest-priority actionable Next task.
+- **Saved views** keep named filters and their sidebar order across devices.
+- **Routines** support weekdays, monthly dates, first/last weekdays of a month,
+  and an interval after completion. New routines keep one unfinished occurrence.
+- **iPhone capture** includes a home-screen web app, recoverable drafts, and
+  an Apple Shortcut recipe for sharing links or text into the capture screen.
+
+See [Planning and iPhone capture](docs/planning.md) for the workflows, new API
+surface, recurrence behavior, and installation/upgrade checks.
 
 **Tickets** carry a status (`open`, `in_progress`, `blocked`, `resolved`,
 `closed`), a priority, optional tags, an optional due date, reference links,
@@ -308,6 +331,7 @@ ignored.
 | `HOST`                         | `0.0.0.0`           | Bind address                                   |
 | `DB_PATH`                      | `./data/homelab.db` | SQLite file (`/data/homelab.db` in Docker)     |
 | `TZ`                           | `UTC`               | Container timezone                             |
+| `APP_TIME_ZONE`                | `America/Denver`    | Civil dates for planning, deadlines, follow-ups, and new routines; legacy schedules retain UTC |
 
 ## API
 

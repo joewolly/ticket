@@ -11,6 +11,7 @@ WORKDIR /app
 COPY package.json ./
 COPY src/ ./src/
 COPY public/ ./public/
+COPY docs/third-party-notices.md docs/lucide-LICENSE.txt ./licenses/
 
 # The database lives on a mounted volume owned by the unprivileged node user.
 RUN mkdir -p /data /backups && chown -R node:node /data /backups /app

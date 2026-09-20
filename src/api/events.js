@@ -32,8 +32,31 @@ export function listEvents(db, ticketId) {
  * that actually moved. `deviceName` resolves the numeric device_id to the name
  * shown in the log; the caller passes the before/after names it already has.
  */
-export function recordChanges(db, ticketId, before, after, { deviceNames = {} } = {}) {
-  const changed = (key) => Object.hasOwn(after, key) && after[key] !== before[key];
+export function recordChanges(
+  db,
+  ticketId,
+  before,
+  after,
+  { deviceNames = {} } = {},
+) {
+  const changed = (key) =>
+    Object.hasOwn(after, key) && after[key] !== before[key];
+  for (const key of [
+    'project_id',
+    'today_rank',
+    'snoozed_until',
+    'waiting_on',
+    'follow_up_date',
+  ]) {
+    if (changed(key))
+      recordEvent(
+        db,
+        ticketId,
+        key,
+        before[key] == null ? null : String(before[key]),
+        after[key] == null ? null : String(after[key]),
+      );
+  }
 
   if (changed('status')) {
     recordEvent(db, ticketId, 'status', before.status, after.status);

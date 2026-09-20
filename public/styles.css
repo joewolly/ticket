@@ -716,3 +716,69 @@ kbd {
   border-radius: var(--radius-sm);
 }
 .bulk-count { font-size: 13px; font-weight: 600; margin-right: auto; }
+
+/* Daily planning */
+.planning-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.planning-card, .list-tools { margin-bottom: 18px; }
+.planning-card h2 { margin-top: 0; }
+.planning-badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.focus-badge { background: var(--accent-soft); color: var(--accent); }
+.focus-list { display: grid; gap: 12px; }
+.focus-task { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-raised); }
+.focus-task:hover { border-color: var(--accent); }
+.focus-number { font-size: 26px; font-weight: 700; color: var(--accent); min-width: 38px; }
+.focus-content { flex: 1; min-width: 180px; }
+.focus-content .ticket-row { border: 0; padding: 4px; background: transparent; }
+.deadline-section { margin-top: 40px; }
+.planning-task { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); margin: 10px 0; overflow: hidden; }
+.planning-task > .planning-actions { padding: 0 16px 14px; }
+.planning-task .ticket-row { border: 0; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 18px; }
+.project-card { display: block; border-top: 3px solid var(--accent); }
+.project-card:hover { border-color: var(--accent); }
+.project-card.archived { opacity: .7; border-top-color: var(--text-faint); }
+progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.next-action { display: grid; gap: 6px; padding: 18px; margin: 0 0 20px; border-radius: var(--radius); background: var(--accent-soft); }
+.next-action a { font-size: 18px; font-weight: 600; }
+.checklist { list-style: none; padding: 0; }
+.checklist li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.checklist label { display: flex; gap: 12px; align-items: center; overflow-wrap: anywhere; }
+.checklist input[type=checkbox] { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--accent); }
+.check-complete { color: var(--text-muted); text-decoration: line-through; }
+.filter-editor { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.weekday-picker { border: 0; padding: 8px 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.weekday-picker label { display: flex; gap: 6px; }
+.weekday-picker input { width: auto; }
+.saved-nav:empty { display: none; }
+.saved-nav { background: var(--accent-soft); }
+.secondary-nav { flex-wrap: wrap; }
+.capture-page { max-width: 760px; margin-inline: auto; }
+.capture-page .capture-title { font-size: 22px; padding: 14px; }
+.capture-page textarea { min-height: 120px; }
+.capture-status { min-height: 28px; padding: 8px 0; color: var(--text-muted); }
+.capture-status.error { color: var(--critical); }
+.draft-files { list-style: none; padding: 0; }
+.draft-files li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.draft-notice { background: var(--accent-soft); padding: 14px; border-radius: var(--radius); margin: 12px 0; }
+.capture-footer { position: sticky; bottom: 0; background: var(--bg-raised); padding: 14px 0 calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); }
+.draft-meta { font-size: 12px; color: var(--text-muted); }
+.planning-actions input { flex: 1; min-width: 150px; }
+.ticket-row .sub { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .topbar { height: auto; min-height: 64px; flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+  .topbar .brand { flex: 1; }
+  .topbar .tabs { order: 3; flex-basis: 100%; overflow-x: auto; white-space: nowrap; }
+  .topbar-actions { margin-left: 0; }
+  .btn, .tabs a, .secondary-nav a { min-height: 44px; }
+  input, textarea, select { font-size: 16px; }
+  .secondary-nav { gap: 3px 10px; padding-inline: 12px; }
+  .secondary-nav a { display: inline-flex; align-items: center; }
+  .focus-task { gap: 10px; padding: 12px; }
+  .focus-task > .planning-actions { width: 100%; }
+  .checklist li { flex-wrap: wrap; }
+  .filter-editor { grid-template-columns: 1fr; }
+  .modal { max-height: 85dvh; overflow-y: auto; }
+  .bulk-bar { flex-wrap: wrap; }
+  .task-actions { flex-wrap: wrap; }
+  main { padding-inline: 12px; }
+}

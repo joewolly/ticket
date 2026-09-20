@@ -1,5 +1,11 @@
 import { transaction } from '../db.js';
-import { createTicket } from './tickets.js';
+import { createTicket, getTicket } from './tickets.js';
+import { civilDate, addDays, timeZoneFor } from '../dates.js';
+import {
+  parseRecurrence,
+  nextOccurrence,
+  syncRecurrence,
+} from '../recurrence.js';
 import { log, errorFields } from '../log.js';
 import {
   PRIORITIES,
@@ -63,17 +69,35 @@ export function getSchedule(db, id) {
 
 export function createSchedule(db, input = {}) {
   const fields = parseSchedule(db, input, { partial: false });
+  return transaction(db, () => {
+    const { lastInsertRowid } = db
+      .prepare(
+        `INSERT INTO schedules (${Object.keys(fields).join(',')}) VALUES (${Object.keys(
+          fields,
+        )
+          .map((k) => ':' + k)
+          .join(',')})`,
+      )
+      .run(fields);
 
-  const { lastInsertRowid } = db
-    .prepare(
-      `INSERT INTO schedules
-         (title, body, priority, device_id, tags, interval_days, lead_days, next_due, paused)
-       VALUES
-         (:title, :body, :priority, :device_id, :tags, :interval_days, :lead_days, :next_due, :paused)`,
-    )
-    .run(fields);
-
-  return getSchedule(db, Number(lastInsertRowid));
+    const id = Number(lastInsertRowid);
+    if (input.source_ticket_id) {
+      const ticket = getTicket(db, input.source_ticket_id);
+      if (ticket.schedule_id)
+        throw new ValidationError('Task already belongs to a schedule');
+      if (!fields.recurrence)
+        throw new ValidationError('Choose a recurrence rule');
+      db.prepare('UPDATE tickets SET schedule_id = ? WHERE id = ?').run(
+        id,
+        ticket.id,
+      );
+      db.prepare(
+        'UPDATE schedules SET last_ticket_id = ?, last_due = next_due WHERE id = ?',
+      ).run(ticket.id, id);
+      syncRecurrence(db, ticket.id);
+    }
+    return getSchedule(db, id);
+  });
 }
 
 export function updateSchedule(db, id, input = {}) {
@@ -81,7 +105,8 @@ export function updateSchedule(db, id, input = {}) {
 
   const fields = parseSchedule(db, input, { partial: true, existing });
   const keys = Object.keys(fields);
-  if (keys.length === 0) throw new ValidationError('No updatable fields provided');
+  if (keys.length === 0)
+    throw new ValidationError('No updatable fields provided');
 
   const assignments = keys.map((key) => `${key} = :${key}`).join(', ');
   db.prepare(
@@ -111,21 +136,54 @@ export function deleteSchedule(db, id) {
  *
  * Returns what it created, which is what the notifier reports on.
  */
-export function runSchedules(db, { today = currentDate(db) } = {}) {
+export function runSchedules(db, { today } = {}) {
   const due = db
     .prepare(
       `SELECT * FROM schedules
         WHERE paused = 0
-          AND date(next_due, '-' || lead_days || ' days') <= :today
         ORDER BY next_due ASC, id ASC`,
     )
-    .all({ today });
+    .all();
 
   const fired = [];
 
   for (const schedule of due) {
     try {
-      fired.push(fire(db, schedule, today));
+      const date =
+        today ??
+        (schedule.recurrence
+          ? civilDate(new Date(), schedule.time_zone)
+          : currentDate(db));
+      if (addDays(schedule.next_due, -schedule.lead_days) > date) continue;
+      if (
+        schedule.recurrence &&
+        db
+          .prepare(
+            "SELECT 1 FROM tickets WHERE schedule_id = ? AND status NOT IN ('resolved','closed') LIMIT 1",
+          )
+          .get(schedule.id)
+      )
+        continue;
+      if (schedule.recurrence && schedule.last_ticket_id) {
+        const last = getTicket(db, schedule.last_ticket_id);
+        if (last.is_open) continue;
+        const rule = JSON.parse(schedule.recurrence);
+        // Calendar routines skip missed dates after an outage. Completion-based
+        // dates remain truly overdue, as their interval started at completion.
+        if (rule.kind !== 'after_completion' && schedule.next_due < date) {
+          schedule.next_due = nextOccurrence(
+            rule,
+            schedule.next_due,
+            addDays(date, -1),
+          );
+          db.prepare('UPDATE schedules SET next_due = ? WHERE id = ?').run(
+            schedule.next_due,
+            schedule.id,
+          );
+          if (schedule.next_due > date) continue;
+        }
+      }
+      fired.push(fire(db, schedule, date));
     } catch (err) {
       // One malformed schedule must not stop the rest of the sweep.
       log.error('schedule failed to fire', {
@@ -151,21 +209,33 @@ function fire(db, schedule, today) {
         device_id: schedule.device_id,
         due_date: schedule.next_due,
         tags: splitTags(schedule.tags),
+        project_id: schedule.project_id,
       },
       { scheduleId: schedule.id },
+    );
+    JSON.parse(schedule.checklist).forEach((title, position) =>
+      db
+        .prepare(
+          'INSERT INTO checklist_items(ticket_id,title,position) VALUES (?,?,?)',
+        )
+        .run(ticket.id, title, position),
     );
 
     db.prepare(
       `UPDATE schedules
           SET next_due = :next_due,
+              last_due = :last_due,
               last_run_at = datetime('now'),
               last_ticket_id = :ticket_id,
               updated_at = datetime('now')
         WHERE id = :id`,
     ).run({
       id: schedule.id,
+      last_due: schedule.next_due,
       ticket_id: ticket.id,
-      next_due: advance(db, schedule.next_due, schedule.interval_days, today),
+      next_due: schedule.recurrence
+        ? schedule.next_due
+        : advance(db, schedule.next_due, schedule.interval_days, today),
     });
 
     return { schedule_id: schedule.id, ticket };
@@ -177,7 +247,9 @@ function advance(db, from, intervalDays, today) {
   // Validation keeps this above zero, so reaching here means the row was
   // corrupted or edited outside the API. Caught rather than looped over.
   if (!(intervalDays >= 1)) {
-    throw new Error(`schedule interval must be at least 1 day, got ${intervalDays}`);
+    throw new Error(
+      `schedule interval must be at least 1 day, got ${intervalDays}`,
+    );
   }
 
   const step = db.prepare(`SELECT date(?, ?) AS next`);
@@ -187,21 +259,27 @@ function advance(db, from, intervalDays, today) {
     next = step.get(next, `+${intervalDays} days`).next;
     if (next > today) return next;
   }
-  throw new Error(`schedule interval ${intervalDays} did not reach a future date`);
+  throw new Error(
+    `schedule interval ${intervalDays} did not reach a future date`,
+  );
 }
 
 function parseSchedule(db, input, { partial, existing = null }) {
   const fields = {};
   const has = (key) => Object.hasOwn(input, key);
 
-  if (!partial || has('title')) fields.title = requiredText(input.title, 'title', 200);
+  if (!partial || has('title'))
+    fields.title = requiredText(input.title, 'title', 200);
   if (!partial || has('body')) fields.body = bodyText(input.body, 'body');
   if (!partial || has('priority')) {
     fields.priority = oneOf(input.priority, PRIORITIES, 'priority', 'medium');
   }
-  if (!partial || has('device_id')) fields.device_id = optionalId(input.device_id, 'device_id');
-  if (!partial || has('tags')) fields.tags = (tagList(input.tags) ?? []).join(',');
-  if (!partial || has('paused')) fields.paused = boolean(input.paused, 'paused') ? 1 : 0;
+  if (!partial || has('device_id'))
+    fields.device_id = optionalId(input.device_id, 'device_id');
+  if (!partial || has('tags'))
+    fields.tags = (tagList(input.tags) ?? []).join(',');
+  if (!partial || has('paused'))
+    fields.paused = boolean(input.paused, 'paused') ? 1 : 0;
 
   if (!partial || has('interval_days')) {
     fields.interval_days = boundedInt(input.interval_days, 'interval_days', {
@@ -220,11 +298,65 @@ function parseSchedule(db, input, { partial, existing = null }) {
   if (!partial || has('next_due')) {
     // Defaulting to today means a new schedule proves itself on the next tick
     // instead of going quiet until its first interval elapses.
-    fields.next_due = optionalDate(input.next_due, 'next_due') ?? currentDate(db);
+    fields.next_due =
+      optionalDate(input.next_due, 'next_due') ?? currentDate(db);
   }
 
   if (fields.device_id) assertDeviceExists(db, fields.device_id);
-  assertLeadFitsInterval(fields, existing);
+  if (!partial || has('recurrence'))
+    fields.recurrence =
+      input.recurrence == null
+        ? null
+        : JSON.stringify(parseRecurrence(input.recurrence));
+  if (!partial || has('project_id'))
+    fields.project_id = optionalId(input.project_id, 'project_id');
+  if (
+    fields.project_id &&
+    !db.prepare('SELECT id FROM projects WHERE id = ?').get(fields.project_id)
+  )
+    throw new ValidationError('Project does not exist');
+  if (!partial || has('checklist')) {
+    const items = input.checklist ?? [];
+    if (!Array.isArray(items) || items.length > 200)
+      throw new ValidationError('Checklist must contain at most 200 items');
+    fields.checklist = JSON.stringify(
+      items.map((t) => requiredText(t, 'checklist item', 500)),
+    );
+  }
+  if (!partial || has('time_zone')) {
+    fields.time_zone =
+      input.time_zone ?? (input.recurrence ? timeZoneFor(db) : 'UTC');
+    try {
+      civilDate(new Date(), fields.time_zone);
+    } catch {
+      throw new ValidationError('Invalid time zone');
+    }
+  }
+  const rule = Object.hasOwn(fields, 'recurrence')
+    ? fields.recurrence
+    : existing?.recurrence
+      ? JSON.stringify(existing.recurrence)
+      : null;
+  if (rule) {
+    fields.lead_days = 0;
+    if (!partial || has('next_due') || has('recurrence')) {
+      const start = fields.next_due ?? existing.next_due;
+      const parsed = JSON.parse(rule);
+      fields.next_due = ['interval', 'after_completion'].includes(parsed.kind)
+        ? start
+        : nextOccurrence(parsed, start, addDays(start, -1));
+    }
+    if (!partial && !input.next_due)
+      fields.next_due = ['interval', 'after_completion'].includes(
+        JSON.parse(rule).kind,
+      )
+        ? civilDate(new Date(), fields.time_zone)
+        : nextOccurrence(
+            JSON.parse(rule),
+            civilDate(new Date(), fields.time_zone),
+            addDays(civilDate(new Date(), fields.time_zone), -1),
+          );
+  } else assertLeadFitsInterval(fields, existing);
 
   return fields;
 }
@@ -236,7 +368,11 @@ function parseSchedule(db, input, { partial, existing = null }) {
  * alone is still checked against the interval already in force.
  */
 function assertLeadFitsInterval(fields, existing) {
-  if (!Object.hasOwn(fields, 'lead_days') && !Object.hasOwn(fields, 'interval_days')) return;
+  if (
+    !Object.hasOwn(fields, 'lead_days') &&
+    !Object.hasOwn(fields, 'interval_days')
+  )
+    return;
 
   const lead = fields.lead_days ?? existing?.lead_days ?? 0;
   const interval = fields.interval_days ?? existing?.interval_days ?? Infinity;
@@ -254,8 +390,15 @@ function assertDeviceExists(db, deviceId) {
 const splitTags = (csv) => (csv ? csv.split(',').filter(Boolean) : []);
 
 /** SQLite's idea of today (UTC), so every date comparison uses one clock. */
-const currentDate = (db) => db.prepare(`SELECT date('now') AS today`).get().today;
+const currentDate = (db) =>
+  db.prepare(`SELECT date('now') AS today`).get().today;
 
-function shapeSchedule({ tags, paused, ...schedule }) {
-  return { ...schedule, tags: splitTags(tags), paused: Boolean(paused) };
+function shapeSchedule({ tags, paused, recurrence, checklist, ...schedule }) {
+  return {
+    ...schedule,
+    tags: splitTags(tags),
+    paused: Boolean(paused),
+    recurrence: recurrence ? JSON.parse(recurrence) : null,
+    checklist: JSON.parse(checklist),
+  };
 }

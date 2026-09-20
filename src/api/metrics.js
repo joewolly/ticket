@@ -1,4 +1,9 @@
-import { CLOSED_STATUSES, PRIORITIES, TICKET_STATUSES, DEVICE_STATUSES } from '../validate.js';
+import {
+  CLOSED_STATUSES,
+  PRIORITIES,
+  TICKET_STATUSES,
+  DEVICE_STATUSES,
+} from '../validate.js';
 
 const CLOSED_LIST = CLOSED_STATUSES.map((s) => `'${s}'`).join(', ');
 
@@ -18,13 +23,21 @@ export function renderMetrics(db, { warrantyDays = 30 } = {}) {
   // 0 means the sweep is disabled, not a zero-day window; show the default span
   // so the gauge stays meaningful either way.
   const warrantyWindow = warrantyDays > 0 ? warrantyDays : 30;
-  const counts = (sql) => new Map(db.prepare(sql).all().map(({ key, count }) => [key, count]));
+  const counts = (sql) =>
+    new Map(
+      db
+        .prepare(sql)
+        .all()
+        .map(({ key, count }) => [key, count]),
+    );
 
   const byPriority = counts(
     `SELECT priority AS key, COUNT(*) AS count FROM tickets
       WHERE status NOT IN (${CLOSED_LIST}) GROUP BY priority`,
   );
-  const byStatus = counts('SELECT status AS key, COUNT(*) AS count FROM tickets GROUP BY status');
+  const byStatus = counts(
+    'SELECT status AS key, COUNT(*) AS count FROM tickets GROUP BY status',
+  );
   const byDeviceStatus = counts(
     'SELECT status AS key, COUNT(*) AS count FROM devices GROUP BY status',
   );
@@ -37,48 +50,102 @@ export function renderMetrics(db, { warrantyDays = 30 } = {}) {
     }
   };
 
-  metric('homelab_tickets_open', 'Unresolved tickets by priority.', 'gauge',
-    PRIORITIES.map((priority) => [`{priority="${priority}"}`, byPriority.get(priority) ?? 0]));
+  metric(
+    'homelab_tickets_open',
+    'Unresolved tickets by priority.',
+    'gauge',
+    PRIORITIES.map((priority) => [
+      `{priority="${priority}"}`,
+      byPriority.get(priority) ?? 0,
+    ]),
+  );
 
-  metric('homelab_tickets', 'All tickets by status.', 'gauge',
-    TICKET_STATUSES.map((status) => [`{status="${status}"}`, byStatus.get(status) ?? 0]));
+  metric(
+    'homelab_tickets',
+    'All tickets by status.',
+    'gauge',
+    TICKET_STATUSES.map((status) => [
+      `{status="${status}"}`,
+      byStatus.get(status) ?? 0,
+    ]),
+  );
 
-  metric('homelab_tickets_overdue', 'Unresolved tickets past their due date.', 'gauge', [
-    ['', scalar(`SELECT COUNT(*) FROM tickets
+  metric(
+    'homelab_tickets_overdue',
+    'Unresolved tickets past their due date.',
+    'gauge',
+    [
+      [
+        '',
+        scalar(`SELECT COUNT(*) FROM tickets
                   WHERE status NOT IN (${CLOSED_LIST})
-                    AND due_date IS NOT NULL AND due_date < date('now')`)],
-  ]);
+                    AND due_date IS NOT NULL AND due_date < app_today()`),
+      ],
+    ],
+  );
 
-  metric('homelab_tickets_stale',
-    `Unresolved Next tasks with no activity for ${STALE_AFTER_DAYS} days.`, 'gauge', [
-      ['', scalar(`SELECT COUNT(*) FROM tickets
+  metric(
+    'homelab_tickets_stale',
+    `Unresolved Next tasks with no activity for ${STALE_AFTER_DAYS} days.`,
+    'gauge',
+    [
+      [
+        '',
+        scalar(`SELECT COUNT(*) FROM tickets
                     WHERE status NOT IN (${CLOSED_LIST})
-                      AND queue = 'next' AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`)],
-    ]);
+                      AND queue = 'next' AND (snoozed_until IS NULL OR snoozed_until <= app_today()) AND (waiting_on IS NULL OR follow_up_date <= app_today()) AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`),
+      ],
+    ],
+  );
 
-  metric('homelab_devices', 'Devices by status.', 'gauge',
-    DEVICE_STATUSES.map((status) => [`{status="${status}"}`, byDeviceStatus.get(status) ?? 0]));
+  metric(
+    'homelab_devices',
+    'Devices by status.',
+    'gauge',
+    DEVICE_STATUSES.map((status) => [
+      `{status="${status}"}`,
+      byDeviceStatus.get(status) ?? 0,
+    ]),
+  );
 
-  metric('homelab_schedules_active', 'Maintenance schedules that are not paused.', 'gauge', [
-    ['', scalar('SELECT COUNT(*) FROM schedules WHERE paused = 0')],
-  ]);
+  metric(
+    'homelab_schedules_active',
+    'Maintenance schedules that are not paused.',
+    'gauge',
+    [['', scalar('SELECT COUNT(*) FROM schedules WHERE paused = 0')]],
+  );
 
-  metric('homelab_schedules_due', 'Active schedules at or past their trigger date.', 'gauge', [
-    ['', scalar(`SELECT COUNT(*) FROM schedules
+  metric(
+    'homelab_schedules_due',
+    'Active schedules at or past their trigger date.',
+    'gauge',
+    [
+      [
+        '',
+        scalar(`SELECT COUNT(*) FROM schedules
                   WHERE paused = 0
-                    AND date(next_due, '-' || lead_days || ' days') <= date('now')`)],
-  ]);
+                    AND date(next_due, '-' || lead_days || ' days') <= date('now')`),
+      ],
+    ],
+  );
 
   metric('homelab_comments', 'Notes recorded across all tickets.', 'counter', [
     ['', scalar('SELECT COUNT(*) FROM comments')],
   ]);
 
-  metric('homelab_warranties_expiring',
-    `Non-retired devices with expired warranties or warranties that lapse within ${warrantyWindow} days.`, 'gauge', [
-      ['', scalar(`SELECT COUNT(*) FROM devices
+  metric(
+    'homelab_warranties_expiring',
+    `Non-retired devices with expired warranties or warranties that lapse within ${warrantyWindow} days.`,
+    'gauge',
+    [
+      [
+        '',
+        scalar(`SELECT COUNT(*) FROM devices
                     WHERE status != 'retired' AND warranty_expires IS NOT NULL
-                      AND warranty_expires <= date('now', '+${warrantyWindow} days')`)],
-    ]);
+                      AND warranty_expires <= date('now', '+${warrantyWindow} days')`),
+      ],
+    ],
+  );
 
   return `${out.join('\n')}\n`;
 }

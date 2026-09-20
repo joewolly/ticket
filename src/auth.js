@@ -4,7 +4,9 @@ import { integer, truthy } from './env.js';
 export const SESSION_COOKIE = 'homelab_session';
 
 /** Paths reachable without a session — the login page and the API it posts to. */
-const PUBLIC_PATHS = new Set(['/login', '/login.js', '/styles.css', '/api/auth/login']);
+const PUBLIC_PATHS = new Set(['/login', '/login.js', '/styles.css', '/api/auth/login',
+  '/capture.html', '/app.js', '/planning.js', '/capture.js', '/draft-store.js', '/sw.js',
+  '/manifest.webmanifest', '/icon.svg', '/apple-touch-icon.png']);
 
 const MIN_PASSWORD_LENGTH = 8;
 const DEFAULT_SESSION_DAYS = 30;

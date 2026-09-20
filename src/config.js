@@ -9,6 +9,7 @@ export const NOTIFY_EVENTS = [
   'ticket.resolved',
   'ticket.overdue',
   'ticket.due_soon',
+  'ticket.follow_up',
   'schedule.fired',
 ];
 
@@ -23,10 +24,13 @@ export const DIGEST_CADENCES = ['off', 'daily', 'weekly'];
  * AUTH_PASSWORD behaves exactly as it did before any of this existed.
  */
 export function loadConfig(env = process.env) {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: env.APP_TIME_ZONE || 'America/Denver' }).format(); }
+  catch { throw new Error('APP_TIME_ZONE must be a valid IANA time zone'); }
   const notifyUrl = httpUrl(env, 'NOTIFY_URL');
   const backupDir = env.BACKUP_DIR?.trim() ?? '';
 
   return {
+    timeZone: env.APP_TIME_ZONE || 'America/Denver',
     ...loadAuthConfig(env),
 
     // Only consult X-Forwarded-For when a proxy really is in front — see the

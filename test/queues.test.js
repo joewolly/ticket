@@ -102,7 +102,7 @@ test('search and exports retain records across all queues and completion', (t) =
   const exported = JSON.parse(exportEntity(db, { entity: 'tickets' }).body);
   assert.deepEqual(exported.map((x) => x.queue), ['inbox', 'next', 'someday', 'next']);
   const csv = exportEntity(db, { entity: 'tickets', format: 'csv' }).body;
-  assert.match(csv.split('\r\n')[0], /,queue$/);
+  assert.ok(csv.split('\r\n')[0].split(',').includes('queue'));
 });
 
 test('only Next grows stale, while deadlines in every queue remain visible and notified', async (t) => {
@@ -149,8 +149,23 @@ test('migration preserves version-5 records and attachment bytes; backup restore
     const { queue: _queue, ...before } = getTicket(db, task.id);
     // Reconstruct the immediately preceding schema, then exercise the normal
     // open/migrate path against its on-disk records (not an empty database).
-    db.exec('DROP INDEX idx_tickets_queue_status; ALTER TABLE tickets DROP COLUMN queue; PRAGMA user_version = 5');
+    db.exec(`DROP TABLE submissions; DROP TABLE saved_views; DROP TABLE checklist_items;
+      DROP INDEX idx_tickets_project;
+      ALTER TABLE tickets DROP COLUMN project_id;
+      ALTER TABLE tickets DROP COLUMN today_rank;
+      ALTER TABLE tickets DROP COLUMN snoozed_until;
+      ALTER TABLE tickets DROP COLUMN waiting_on;
+      ALTER TABLE tickets DROP COLUMN follow_up_date;
+      ALTER TABLE tickets DROP COLUMN follow_up_notified_at;
+      ALTER TABLE schedules DROP COLUMN recurrence;
+      ALTER TABLE schedules DROP COLUMN project_id;
+      ALTER TABLE schedules DROP COLUMN checklist;
+      ALTER TABLE schedules DROP COLUMN time_zone;
+      ALTER TABLE schedules DROP COLUMN last_due;
+      DROP TABLE projects;
+      DROP INDEX idx_tickets_queue_status; ALTER TABLE tickets DROP COLUMN queue; PRAGMA user_version = 5`);
     db.close();
+    db = null;
     db = openDatabase(path);
     const { queue, ...after } = getTicket(db, task.id);
     assert.equal(queue, 'next');
