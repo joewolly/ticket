@@ -1097,7 +1097,7 @@ function ticketSidebar(ticket, devices, patch, id) {
       'Status',
       select('status', TICKET_STATUSES, ticket.status, (e) => {
         const reopening = !ticket.is_open && !['resolved', 'closed'].includes(e.target.value);
-        patch(reopening ? { status: 'open', queue: 'next' } : { status: e.target.value });
+        patch(reopening ? { status: e.target.value, queue: 'next' } : { status: e.target.value });
       }),
     ),
     block(

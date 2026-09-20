@@ -49,7 +49,9 @@ Review items individually or select several at once:
 - **All:** every task, including completed work.
 
 Move items to Next or Someday, or mark them Done. Reopening in the UI returns a
-task to Next with open status. Moving a completed task between queues does not
+task to Next with open status using the Reopen action. Choosing an active status
+in the detail dropdown also moves it to Next and preserves that selected status.
+Moving a completed task between queues does not
 reopen it. Search covers titles, descriptions, and notes across **all lists**,
 including Done; other selected filters such as tags still apply. Each result
 shows its list. Tags such as `home`, `tech`, and `personal` are optional.
