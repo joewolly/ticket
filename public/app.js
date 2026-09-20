@@ -332,7 +332,7 @@ function openModal(title, buildBody, onSubmit) {
     if (e.key === 'Escape') close();
     if (e.key !== 'Tab') return;
     const targets = [...form.querySelectorAll('input, textarea, select, button, summary')]
-      .filter((node) => !node.disabled && node.getClientRects().length > 0);
+      .filter((node) => !node.matches(':disabled') && node.getClientRects().length > 0);
     const first = targets[0];
     const last = targets.at(-1);
     if (!first) { e.preventDefault(); return; }
@@ -363,7 +363,7 @@ function openModal(title, buildBody, onSubmit) {
     submit.textContent = 'Saving…';
     form.setAttribute('aria-busy', 'true');
     try {
-      await onSubmit(data);
+      await onSubmit(data, form);
       saving = false;
       close();
     } catch (err) {
@@ -371,7 +371,7 @@ function openModal(title, buildBody, onSubmit) {
     } finally {
       saving = false;
       controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
-      submit.textContent = 'Save';
+      submit.textContent = submit.dataset.idleLabel || 'Save';
       form.removeAttribute('aria-busy');
     }
   });
@@ -1008,26 +1008,49 @@ function commentsCard(ticket, id) {
 }
 
 /** Attachments: photos of the fault, the invoice, a saved log. */
+async function uploadAttachment(id, file) {
+  const res = await fetch(`/api/tickets/${id}/attachments`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': attachmentType(file),
+      // Header values are Latin-1; preserve Unicode names with percent encoding.
+      'X-Filename': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    throw new Error(payload.error ?? `Upload failed (${res.status})`);
+  }
+}
+
+const ATTACHMENT_TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
+};
+
+function attachmentType(file) {
+  const extensionType = ATTACHMENT_TYPES[file.name.split('.').pop().toLowerCase()];
+  return Object.values(ATTACHMENT_TYPES).includes(file.type)
+    ? file.type
+    : extensionType || 'application/octet-stream';
+}
+
+function attachmentError(file) {
+  if (!file.size) return 'File is empty';
+  if (file.size > 1024 * 1024) return 'Larger than 1 MB';
+  if (file.name.length > 200) return 'Filename must be 200 characters or fewer';
+  if (!Object.values(ATTACHMENT_TYPES).includes(attachmentType(file))) return 'Unsupported file type';
+  return '';
+}
+
 function attachmentsCard(ticket, id) {
   const fileInput = el('input', { type: 'file', style: 'display: none' });
 
   const upload = guard(async () => {
     const file = fileInput.files[0];
     if (!file) return;
-    const res = await fetch(`/api/tickets/${id}/attachments`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': file.type || 'application/octet-stream',
-        // Header values are Latin-1; percent-encode so a name with accents or
-        // emoji survives the trip and is decoded server-side.
-        'X-Filename': encodeURIComponent(file.name),
-      },
-      body: file,
-    });
-    if (!res.ok) {
-      const payload = await res.json().catch(() => ({}));
-      throw new Error(payload.error ?? `Upload failed (${res.status})`);
-    }
+    await uploadAttachment(id, file);
     render();
   });
 
@@ -1156,13 +1179,42 @@ function ticketSidebar(ticket, devices, patch, id) {
 
 async function newTicketModal(presetDeviceId) {
   const devices = await api('/devices').catch(() => []);
+  let savedTicket;
+  const files = [];
+  const taskFields = el('fieldset', { class: 'capture-fields' });
+  const fileList = el('ul', { class: 'capture-files', 'aria-label': 'Selected files' });
+  const uploadStatus = el('p', { class: 'capture-upload-status', role: 'status', 'aria-live': 'polite' });
+  const fileInput = el('input', {
+    type: 'file', multiple: true, hidden: true,
+    accept: Object.keys(ATTACHMENT_TYPES).map((ext) => `.${ext}`).join(','),
+    'aria-label': 'Choose attachments',
+  });
+  const drawFiles = () => fileList.replaceChildren(...files.map((entry) => el(
+    'li', {},
+    el('span', {}, entry.file.name, el('small', { class: entry.error ? 'capture-file-error' : 'muted' },
+      `${formatBytes(entry.file.size)} · ${entry.error || (entry.uploaded ? 'Uploaded' : 'Ready to upload')}`)),
+    !entry.uploaded && el('button', {
+      type: 'button', class: 'btn btn-sm', 'aria-label': `Remove ${entry.file.name}`,
+      onclick: () => { files.splice(files.indexOf(entry), 1); drawFiles(); },
+    }, 'Remove'),
+  )));
+  fileInput.addEventListener('change', () => {
+    for (const file of fileInput.files) files.push({ file, error: attachmentError(file), uploaded: false });
+    fileInput.value = '';
+    drawFiles();
+  });
+  const attachmentFields = el('fieldset', { class: 'capture-fields capture-attachments' },
+    el('legend', {}, 'Attachments (optional)'),
+    fileInput,
+    el('button', { type: 'button', class: 'btn btn-sm', onclick: () => fileInput.click() }, 'Add files'),
+    el('p', { class: 'muted capture-file-help' }, 'PNG, JPG, GIF, WebP, PDF, or text · 1 MB per file'),
+    fileList,
+  );
 
   openModal(
     'Add task',
-    () =>
-      el(
-        'div',
-        {},
+    () => {
+      taskFields.append(
         field('Title', el('input', { name: 'title', required: true, maxlength: 200, placeholder: 'What do you want to remember?' })),
         el('p', { class: 'muted' }, 'Saved to Inbox. You can sort it out later.'),
         el('details', { class: 'capture-details' },
@@ -1191,9 +1243,16 @@ async function newTicketModal(presetDeviceId) {
             field('Tags', el('input', { name: 'tags', placeholder: 'home, tech, personal' })),
           ),
         ),
-      ),
-    async (data) => {
-      const ticket = await api('/tickets', {
+      );
+      return el('div', {}, taskFields, attachmentFields, uploadStatus);
+    },
+    async (data, form) => {
+      const invalid = files.find((entry) => attachmentError(entry.file));
+      if (invalid) throw new Error(`${invalid.file.name}: ${attachmentError(invalid.file)}. Remove it or choose another file.`);
+
+      // Keep the created ID while this dialog is open: upload retries must not
+      // recreate the task or repeat uploads that already succeeded.
+      if (!savedTicket) savedTicket = await api('/tickets', {
         method: 'POST',
         body: {
           title: data.title,
@@ -1205,8 +1264,28 @@ async function newTicketModal(presetDeviceId) {
           tags: parseTags(data.tags),
         },
       });
-      toast(`Saved to Inbox: ${ticket.title}`);
-      await render();
+      taskFields.disabled = true;
+      form.querySelector('[type="submit"]').dataset.idleLabel = 'Retry uploads';
+      form.querySelector('.modal-actions [type="button"]').textContent = 'Close';
+      attachmentFields.disabled = true;
+      try {
+        for (const entry of files.filter((item) => !item.uploaded)) {
+          uploadStatus.textContent = `Task saved to Inbox. Uploading ${entry.file.name}…`;
+          try {
+            await uploadAttachment(savedTicket.id, entry.file);
+            entry.uploaded = true;
+            entry.error = '';
+          } catch (err) {
+            entry.error = err.message;
+            uploadStatus.textContent = 'Your task is saved. Some files are not attached yet. Retry uploads, remove the remaining files, or close and attach them from the task later.';
+            throw new Error(`Task saved, but ${entry.file.name} did not upload: ${err.message}`);
+          } finally { drawFiles(); }
+        }
+      } finally {
+        attachmentFields.disabled = false;
+        await render();
+      }
+      toast(`Saved to Inbox: ${savedTicket.title}`);
     },
   );
 }

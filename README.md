@@ -40,6 +40,14 @@ The home screen is **Inbox**. Press **Add task** (or `n`), enter a title, and
 save. Notes, tags, priorities, dates, and devices are optional details. Saving
 keeps you on the same page; the new task waits in Inbox.
 
+Use **Add files** in the creation form to select attachments before saving.
+You can select several files, review their names, and remove any before upload.
+PNG, JPG, GIF, WebP, PDF, and text files are supported, up to **1 MB per file**.
+If an upload fails after the task is saved, the form keeps the remaining files
+and offers **Retry uploads** without creating another task or re-uploading files
+already confirmed as uploaded. You can also close the form and attach files
+later from the task's **Attachments** section.
+
 Review items individually or select several at once:
 
 - **Inbox:** unreviewed thoughts, oldest first.
