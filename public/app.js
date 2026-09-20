@@ -1030,7 +1030,10 @@ const ATTACHMENT_TYPES = {
 };
 
 function attachmentType(file) {
-  return file.type || ATTACHMENT_TYPES[file.name.split('.').pop().toLowerCase()] || 'application/octet-stream';
+  const extensionType = ATTACHMENT_TYPES[file.name.split('.').pop().toLowerCase()];
+  return Object.values(ATTACHMENT_TYPES).includes(file.type)
+    ? file.type
+    : extensionType || 'application/octet-stream';
 }
 
 function attachmentError(file) {
