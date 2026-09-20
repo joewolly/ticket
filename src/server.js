@@ -1,5 +1,8 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { projects, savedViews, checklist, orderToday } from './api/planning.js';
+import { configureDates, dateFor, timeZoneFor } from './dates.js';
+import { submitOnce } from './submissions.js';
 import { openDatabase } from './db.js';
 import { serveStatic } from './static.js';
 import { ValidationError } from './validate.js';
@@ -101,11 +104,81 @@ const SECURITY_HEADERS = {
  * and 200 for everything else.
  */
 const ROUTES = [
+  [
+    'GET',
+    '/api/planning',
+    ({ db }) => ({
+      today: dateFor(db),
+      time_zone: timeZoneFor(db),
+    }),
+  ],
+  ['GET', '/api/projects', ({ db }) => projects(db)],
+  ['POST', '/api/projects', ({ db, body }) => projects(db, null, body, 'POST')],
+  ['GET', '/api/projects/:id', ({ db, params }) => projects(db, params.id)],
+  [
+    'PATCH',
+    '/api/projects/:id',
+    ({ db, params, body }) => projects(db, params.id, body, 'PATCH'),
+  ],
+  [
+    'DELETE',
+    '/api/projects/:id',
+    ({ db, params }) => projects(db, params.id, {}, 'DELETE'),
+  ],
+  ['GET', '/api/views', ({ db }) => savedViews(db)],
+  ['POST', '/api/views', ({ db, body }) => savedViews(db, null, body, 'POST')],
+  [
+    'PUT',
+    '/api/views/order',
+    ({ db, body }) => savedViews(db, null, body, 'PUT'),
+  ],
+  ['GET', '/api/views/:id', ({ db, params }) => savedViews(db, params.id)],
+  [
+    'PATCH',
+    '/api/views/:id',
+    ({ db, params, body }) => savedViews(db, params.id, body, 'PATCH'),
+  ],
+  [
+    'DELETE',
+    '/api/views/:id',
+    ({ db, params }) => savedViews(db, params.id, {}, 'DELETE'),
+  ],
+  ['PUT', '/api/tickets/today/order', ({ db, body }) => orderToday(db, body)],
+  [
+    'GET',
+    '/api/tickets/:id/checklist',
+    ({ db, params }) => checklist(db, params.id),
+  ],
+  [
+    'POST',
+    '/api/tickets/:id/checklist',
+    ({ db, params, body }) => checklist(db, params.id, null, body, 'POST'),
+  ],
+  [
+    'PUT',
+    '/api/tickets/:id/checklist/order',
+    ({ db, params, body }) => checklist(db, params.id, null, body, 'PUT'),
+  ],
+  [
+    'PATCH',
+    '/api/tickets/:id/checklist/:item',
+    ({ db, params, body }) =>
+      checklist(db, params.id, params.item, body, 'PATCH'),
+  ],
+  [
+    'DELETE',
+    '/api/tickets/:id/checklist/:item',
+    ({ db, params }) => checklist(db, params.id, params.item, {}, 'DELETE'),
+  ],
   ['GET', '/api/health', () => ({ status: 'ok' })],
 
   ['POST', '/api/auth/login', login, 200],
   ['POST', '/api/auth/logout', logout, 200],
-  ['GET', '/api/auth/session', ({ config }) => ({ authenticated: true, enabled: config.enabled })],
+  [
+    'GET',
+    '/api/auth/session',
+    ({ config }) => ({ authenticated: true, enabled: config.enabled }),
+  ],
 
   ['GET', '/api/stats', ({ db }) => getStats(db)],
   ['GET', '/api/tags', ({ db }) => listTags(db)],
@@ -117,30 +190,63 @@ const ROUTES = [
   ['GET', '/api/devices', ({ db, query }) => listDevices(db, query)],
   ['POST', '/api/devices', ({ db, body }) => createDevice(db, body)],
   ['GET', '/api/devices/:id', ({ db, params }) => getDevice(db, params.id)],
-  ['PATCH', '/api/devices/:id', ({ db, params, body }) => updateDevice(db, params.id, body)],
-  ['DELETE', '/api/devices/:id', ({ db, params }) => deleteDevice(db, params.id)],
+  [
+    'PATCH',
+    '/api/devices/:id',
+    ({ db, params, body }) => updateDevice(db, params.id, body),
+  ],
+  [
+    'DELETE',
+    '/api/devices/:id',
+    ({ db, params }) => deleteDevice(db, params.id),
+  ],
 
   ['GET', '/api/schedules', ({ db, query }) => listSchedules(db, query)],
   ['POST', '/api/schedules', ({ db, body }) => createSchedule(db, body)],
   ['GET', '/api/schedules/:id', ({ db, params }) => getSchedule(db, params.id)],
-  ['PATCH', '/api/schedules/:id', ({ db, params, body }) => updateSchedule(db, params.id, body)],
-  ['DELETE', '/api/schedules/:id', ({ db, params }) => deleteSchedule(db, params.id)],
+  [
+    'PATCH',
+    '/api/schedules/:id',
+    ({ db, params, body }) => updateSchedule(db, params.id, body),
+  ],
+  [
+    'DELETE',
+    '/api/schedules/:id',
+    ({ db, params }) => deleteSchedule(db, params.id),
+  ],
 
   ['GET', '/api/tickets', ({ db, query }) => listTickets(db, query)],
-  ['POST', '/api/tickets/bulk', ({ db, body }) => bulkUpdateTickets(db, body), 200],
+  [
+    'POST',
+    '/api/tickets/bulk',
+    ({ db, body }) => bulkUpdateTickets(db, body),
+    200,
+  ],
   ['POST', '/api/tickets', createTicketAndNotify],
   ['GET', '/api/tickets/:id', ({ db, params }) => getTicket(db, params.id)],
   ['PATCH', '/api/tickets/:id', updateTicketAndNotify],
-  ['DELETE', '/api/tickets/:id', ({ db, params }) => deleteTicket(db, params.id)],
+  [
+    'DELETE',
+    '/api/tickets/:id',
+    ({ db, params }) => deleteTicket(db, params.id),
+  ],
 
-  ['POST', '/api/tickets/:id/comments', ({ db, params, body }) => addComment(db, params.id, body)],
+  [
+    'POST',
+    '/api/tickets/:id/comments',
+    ({ db, params, body }) => addComment(db, params.id, body),
+  ],
   [
     'DELETE',
     '/api/tickets/:id/comments/:commentId',
     ({ db, params }) => deleteComment(db, params.id, params.commentId),
   ],
 
-  ['POST', '/api/tickets/:id/links', ({ db, params, body }) => addLink(db, params.id, body)],
+  [
+    'POST',
+    '/api/tickets/:id/links',
+    ({ db, params, body }) => addLink(db, params.id, body),
+  ],
   [
     'DELETE',
     '/api/tickets/:id/links/:linkId',
@@ -156,20 +262,35 @@ const ROUTES = [
     '/api/tickets/:id/attachments/:attachmentId',
     ({ db, params }) => deleteAttachment(db, params.id, params.attachmentId),
   ],
-].map(([method, pattern, handler, status = method === 'POST' ? 201 : 200, raw = false]) => ({
-  method,
-  handler,
-  status,
-  raw,
-  ...compile(pattern),
-}));
+].map(
+  ([
+    method,
+    pattern,
+    handler,
+    status = method === 'POST' ? 201 : 200,
+    raw = false,
+  ]) => ({
+    method,
+    handler,
+    status,
+    raw,
+    ...compile(pattern),
+  }),
+);
 
 /* ---- Handlers that need more than the data layer ------------------------ */
 
-function createTicketAndNotify({ db, body, notifier }) {
-  const ticket = createTicket(db, body);
-  notifier.sendDetached('ticket.created', ticket);
-  return ticket;
+function createTicketAndNotify({ db, body, notifier, req }) {
+  const { value, fresh } = submitOnce(
+    db,
+    'ticket',
+    req.headers['idempotency-key'],
+    JSON.stringify(body),
+    () => createTicket(db, body),
+    (id) => getTicket(db, id),
+  );
+  if (fresh) notifier.sendDetached('ticket.created', value);
+  return value;
 }
 
 function updateTicketAndNotify({ db, params, body, notifier }) {
@@ -190,13 +311,16 @@ function updateTicketAndNotify({ db, params, body, notifier }) {
  */
 async function runMaintenance({ db, config, notifier }) {
   const fired = runSchedules(db);
-  for (const { ticket } of fired) notifier.sendDetached('schedule.fired', ticket);
+  for (const { ticket } of fired)
+    notifier.sendDetached('schedule.fired', ticket);
 
   const warranties = sweepWarranties(db, { leadDays: config.warrantyDays });
-  for (const { ticket } of warranties) notifier.sendDetached('ticket.created', ticket);
+  for (const { ticket } of warranties)
+    notifier.sendDetached('ticket.created', ticket);
 
   const overdue = await notifier.sweepOverdue(db);
   const dueSoon = await notifier.sweepDueSoon(db);
+  const followUps = await notifier.sweepFollowUps(db);
   await notifier.maybeSendDigest(db);
   purgeExpiredSessions(db);
 
@@ -211,15 +335,30 @@ async function runMaintenance({ db, config, notifier }) {
     })),
     overdue_notified: overdue,
     due_soon_notified: dueSoon,
+    follow_ups_notified: followUps,
   };
 }
 
 function uploadAttachment({ db, params, body, req }) {
-  return addAttachment(db, params.id, {
+  const input = {
     filename: decodeFilename(req.headers['x-filename']),
     contentType: req.headers['content-type'],
     data: body,
-  });
+  };
+  return submitOnce(
+    db,
+    `attachment:${params.id}`,
+    req.headers['idempotency-key'],
+    Buffer.concat([
+      Buffer.from(JSON.stringify([input.filename, input.contentType])),
+      body,
+    ]),
+    () => addAttachment(db, params.id, input),
+    (id) => {
+      const { data, ...file } = getAttachment(db, id);
+      return file;
+    },
+  ).value;
 }
 
 /**
@@ -305,9 +444,12 @@ function login({ db, config, body, req, res }) {
   const key = clientKey(req, config);
   const locked = lockoutRemaining(key);
   if (locked) {
-    throw Object.assign(new Error(`Too many attempts. Try again in ${locked} seconds.`), {
-      status: 429,
-    });
+    throw Object.assign(
+      new Error(`Too many attempts. Try again in ${locked} seconds.`),
+      {
+        status: 429,
+      },
+    );
   }
 
   if (!verifyPassword(config, body.password)) {
@@ -317,7 +459,11 @@ function login({ db, config, body, req, res }) {
   }
 
   clearFailures(key);
-  const { token, expiresAt } = createSession(db, config, req.headers['user-agent']);
+  const { token, expiresAt } = createSession(
+    db,
+    config,
+    req.headers['user-agent'],
+  );
   res.setHeader('Set-Cookie', sessionCookie(token, config, expiresAt));
   log.info('signed in', { client: key });
   return { authenticated: true, enabled: true };
@@ -383,8 +529,14 @@ function readBody(req) {
       if (raw === '') return resolve({});
       try {
         const parsed = JSON.parse(raw);
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          return reject(new ValidationError('Request body must be a JSON object'));
+        if (
+          parsed === null ||
+          typeof parsed !== 'object' ||
+          Array.isArray(parsed)
+        ) {
+          return reject(
+            new ValidationError('Request body must be a JSON object'),
+          );
         }
         resolve(parsed);
       } catch {
@@ -428,6 +580,7 @@ function sendJson(res, status, payload) {
 
 /** Builds the request handler against an already-open database. */
 export function createApp(db, config = { enabled: false }) {
+  if (config.timeZone) configureDates(db, config.timeZone);
   const limiter = createRateLimiter(config.rateLimit);
   const notifier = createNotifier(config);
 
@@ -455,8 +608,8 @@ export function createApp(db, config = { enabled: false }) {
       else log.debug('request', fields);
     });
 
-    // Nothing but the login page and its endpoint is reachable without a
-    // session, so this gate runs before routing and before any file is read.
+    // Only login and static capture assets are public. Server data is always
+    // gated before routing or file reads.
     if (authorize(db, config, req, pathname)) {
       if (pathname.startsWith('/api/')) {
         return sendJson(res, 401, { error: 'Authentication required' });
@@ -466,7 +619,10 @@ export function createApp(db, config = { enabled: false }) {
 
     if (!pathname.startsWith('/api/')) {
       // An authenticated visitor has no use for the login page.
-      if (pathname === '/login' && (!config.enabled || !authorize(db, config, req, '/'))) {
+      if (
+        pathname === '/login' &&
+        (!config.enabled || !authorize(db, config, req, '/'))
+      ) {
         return res.writeHead(302, { Location: '/' }).end();
       }
 
@@ -487,9 +643,12 @@ export function createApp(db, config = { enabled: false }) {
     }
 
     const matched = match(req.method, pathname);
-    if (!matched) return sendJson(res, 404, { error: `No route for ${pathname}` });
+    if (!matched)
+      return sendJson(res, 404, { error: `No route for ${pathname}` });
     if (matched.methodNotAllowed) {
-      return sendJson(res, 405, { error: `${req.method} not allowed on ${pathname}` });
+      return sendJson(res, 405, {
+        error: `${req.method} not allowed on ${pathname}`,
+      });
     }
 
     try {
@@ -542,18 +701,24 @@ export function startMaintenance(db, config) {
   const tick = async () => {
     try {
       const fired = runSchedules(db);
-      for (const { ticket } of fired) await notifier.send('schedule.fired', ticket);
-      if (fired.length > 0) log.info('schedules fired', { count: fired.length });
+      for (const { ticket } of fired)
+        await notifier.send('schedule.fired', ticket);
+      if (fired.length > 0)
+        log.info('schedules fired', { count: fired.length });
 
       const warranties = sweepWarranties(db, { leadDays: config.warrantyDays });
-      for (const { ticket } of warranties) await notifier.send('ticket.created', ticket);
-      if (warranties.length > 0) log.info('warranties flagged', { count: warranties.length });
+      for (const { ticket } of warranties)
+        await notifier.send('ticket.created', ticket);
+      if (warranties.length > 0)
+        log.info('warranties flagged', { count: warranties.length });
 
       const overdue = await notifier.sweepOverdue(db);
-      if (overdue.length > 0) log.info('overdue notified', { count: overdue.length });
+      if (overdue.length > 0)
+        log.info('overdue notified', { count: overdue.length });
 
       const dueSoon = await notifier.sweepDueSoon(db);
-      if (dueSoon.length > 0) log.info('due-soon notified', { count: dueSoon.length });
+      if (dueSoon.length > 0)
+        log.info('due-soon notified', { count: dueSoon.length });
 
       if (await notifier.maybeSendDigest(db)) log.info('digest sent');
 
@@ -571,7 +736,10 @@ export function startMaintenance(db, config) {
   if (config.backup?.enabled) {
     void runBackupSafely(db, config.backup);
     timers.push(
-      setInterval(() => void runBackupSafely(db, config.backup), config.backup.intervalHours * 3600_000),
+      setInterval(
+        () => void runBackupSafely(db, config.backup),
+        config.backup.intervalHours * 3600_000,
+      ),
     );
   }
 
@@ -581,7 +749,10 @@ export function startMaintenance(db, config) {
 }
 
 /** Entry point — only runs when this file is executed directly. */
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   const port = Number(process.env.PORT ?? 8080);
   const host = process.env.HOST ?? '0.0.0.0';
   const dbPath = process.env.DB_PATH ?? './data/homelab.db';
@@ -605,12 +776,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     log.info('listening', {
       url: `http://${host}:${server.address().port}`,
       db: dbPath,
-      auth: config.enabled ? (config.apiToken ? 'password+token' : 'password') : 'DISABLED',
+      auth: config.enabled
+        ? config.apiToken
+          ? 'password+token'
+          : 'password'
+        : 'DISABLED',
       notify: config.notify.enabled ? config.notify.format : 'off',
-      backups: config.backup.enabled ? `every ${config.backup.intervalHours}h` : 'off',
+      backups: config.backup.enabled
+        ? `every ${config.backup.intervalHours}h`
+        : 'off',
     });
     if (!config.enabled) {
-      log.warn('authentication is disabled — anyone who can reach this port has full access');
+      log.warn(
+        'authentication is disabled — anyone who can reach this port has full access',
+      );
     }
   });
 

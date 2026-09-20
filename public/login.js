@@ -25,7 +25,9 @@ form.addEventListener('submit', async (event) => {
     if (res.ok) {
       // Full navigation rather than a hash change, so the app boots with the
       // session cookie already set.
-      location.replace('/');
+      const target = sessionStorage.getItem('taskhub-return');
+      sessionStorage.removeItem('taskhub-return');
+      location.replace(target && /^\/(?:capture\.html)?#\//.test(target) ? target : '/');
       return;
     }
 

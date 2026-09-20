@@ -97,7 +97,7 @@ export function requiredId(value, field) {
 export function optionalDate(value, field) {
   const text = optionalText(value, field, 10);
   if (text === null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(text))) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(text)) || new Date(text).toISOString().slice(0, 10) !== text) {
     throw new ValidationError(`${field} must be a valid date in YYYY-MM-DD format`);
   }
   return text;

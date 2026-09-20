@@ -47,7 +47,9 @@ export function renderCalendar(db, { now = new Date() } = {}) {
   const schedules = db
     .prepare(
       `SELECT id, title, next_due FROM schedules
-        WHERE paused = 0 ORDER BY next_due ASC`,
+        WHERE paused = 0 AND (recurrence IS NULL OR last_ticket_id IS NULL OR NOT EXISTS
+          (SELECT 1 FROM tickets WHERE id = schedules.last_ticket_id AND status NOT IN (${CLOSED_LIST})))
+        ORDER BY next_due ASC`,
     )
     .all();
 
@@ -63,6 +65,9 @@ export function renderCalendar(db, { now = new Date() } = {}) {
     );
   }
 
+  for (const task of db.prepare(`SELECT id,title,waiting_on,follow_up_date FROM tickets WHERE status NOT IN (${CLOSED_LIST}) AND waiting_on IS NOT NULL AND follow_up_date IS NOT NULL AND (snoozed_until IS NULL OR snoozed_until <= app_today())`).all()) {
+    lines.push(...event({ uid: `followup-${task.id}@homelab`, stamp, date: task.follow_up_date, summary: `Follow up: ${task.title}`, description: task.waiting_on }));
+  }
   lines.push('END:VCALENDAR');
   // RFC 5545 wants CRLF line breaks; a trailing one keeps strict parsers happy.
   return lines.map(fold).join('\r\n') + '\r\n';

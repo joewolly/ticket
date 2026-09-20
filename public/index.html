@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e1116" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="color-scheme" content="dark light" />
     <title>Task Hub</title>
     <link rel="stylesheet" href="/styles.css" />
@@ -19,6 +22,7 @@
       </a>
       <nav class="tabs" aria-label="Task lists">
         <a href="#/" data-tab="inbox">Inbox</a>
+        <a href="#/today" data-tab="today">Today</a>
         <a href="#/next" data-tab="next">Next</a>
         <a href="#/someday" data-tab="someday">Someday</a>
         <a href="#/done" data-tab="done">Done</a>
@@ -32,10 +36,16 @@
     </header>
 
     <nav class="secondary-nav" aria-label="Tools">
+      <a href="#/projects" data-tab="projects">Projects</a>
+      <a href="#/waiting" data-tab="waiting">Waiting</a>
+      <a href="#/snoozed" data-tab="snoozed">Snoozed</a>
+      <a href="#/views" data-tab="views">Saved views</a>
+      <a href="#/drafts" data-tab="drafts">Drafts</a>
       <a href="#/dashboard" data-tab="dashboard">Dashboard</a>
       <a href="#/devices" data-tab="devices">Devices</a>
       <a href="#/schedules" data-tab="schedules">Schedules</a>
     </nav>
+    <nav id="saved-views-nav" class="secondary-nav saved-nav" aria-label="Saved views"></nav>
 
     <main id="view" aria-live="polite"></main>
 

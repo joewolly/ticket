@@ -1,17 +1,24 @@
 import { log, errorFields } from './log.js';
 import { CLOSED_STATUSES, PRIORITIES } from './validate.js';
+import { dateFor } from './dates.js';
 
 const CLOSED_LIST = CLOSED_STATUSES.map((s) => `'${s}'`).join(', ');
 
 /** ntfy's own priority scale, which does not line up with ours by name. */
 const NTFY_PRIORITY = { low: '2', medium: '3', high: '4', critical: '5' };
-const NTFY_TAGS = { low: 'information_source', medium: 'wrench', high: 'warning', critical: 'rotating_light' };
+const NTFY_TAGS = {
+  low: 'information_source',
+  medium: 'wrench',
+  high: 'warning',
+  critical: 'rotating_light',
+};
 
 const SUBJECTS = {
   'ticket.created': (t) => `New ${t.priority} ticket: ${t.title}`,
   'ticket.resolved': (t) => `Resolved: ${t.title}`,
   'ticket.overdue': (t) => `Overdue since ${t.due_date}: ${t.title}`,
   'ticket.due_soon': (t) => `Due ${t.due_date}: ${t.title}`,
+  'ticket.follow_up': (t) => `Follow up: ${t.title} (${t.waiting_on})`,
   'schedule.fired': (t) => `Maintenance due: ${t.title}`,
 };
 
@@ -41,7 +48,9 @@ export function createNotifier(config = {}) {
 
     const subject = SUBJECTS[event]?.(ticket) ?? `${event}: ${ticket.title}`;
     const request =
-      settings.format === 'ntfy' ? ntfyRequest(subject, ticket) : jsonRequest(event, subject, ticket);
+      settings.format === 'ntfy'
+        ? ntfyRequest(subject, ticket)
+        : jsonRequest(event, subject, ticket);
 
     return deliver(request, { event, ticket_id: ticket.id });
   }
@@ -83,7 +92,7 @@ export function createNotifier(config = {}) {
         `SELECT id, title, priority, due_date, status FROM tickets
           WHERE status NOT IN (${CLOSED_LIST})
             AND due_date IS NOT NULL
-            AND due_date < date('now')
+            AND due_date < app_today()
             AND overdue_notified_at IS NULL
           ORDER BY due_date ASC`,
       )
@@ -111,7 +120,12 @@ export function createNotifier(config = {}) {
    */
   async function sweepDueSoon(db) {
     const days = settings.reminderDays ?? 0;
-    if (!settings.enabled || !settings.events?.has('ticket.due_soon') || days <= 0) return [];
+    if (
+      !settings.enabled ||
+      !settings.events?.has('ticket.due_soon') ||
+      days <= 0
+    )
+      return [];
 
     const soon = db
       .prepare(
@@ -119,8 +133,8 @@ export function createNotifier(config = {}) {
           WHERE status NOT IN (${CLOSED_LIST})
             AND due_date IS NOT NULL
             AND due_soon_notified_at IS NULL
-            AND due_date >= date('now')
-            AND due_date <= date('now', '+' || :days || ' days')
+            AND due_date >= app_today()
+            AND due_date <= date(app_today(), '+' || :days || ' days')
           ORDER BY due_date ASC`,
       )
       .all({ days });
@@ -156,7 +170,8 @@ export function createNotifier(config = {}) {
     // whole cycle later.
     const threshold = DIGEST_INTERVAL_DAYS[cadence] - 1 / 24;
     const previous =
-      db.prepare(`SELECT value FROM meta WHERE key = 'digest_last_sent'`).get()?.value ?? null;
+      db.prepare(`SELECT value FROM meta WHERE key = 'digest_last_sent'`).get()
+        ?.value ?? null;
 
     // Claim the send atomically: stamp the timestamp only if the cadence is
     // actually due. Two overlapping calls both try this, but SQLite serializes
@@ -172,7 +187,8 @@ export function createNotifier(config = {}) {
     if (claim.changes === 0) return false; // not due yet, or another call claimed it
 
     const summary = buildDigest(db);
-    const request = settings.format === 'ntfy' ? ntfyDigest(summary) : jsonDigest(summary);
+    const request =
+      settings.format === 'ntfy' ? ntfyDigest(summary) : jsonDigest(summary);
 
     if (await deliver(request, { event: 'digest' })) return true;
 
@@ -181,13 +197,32 @@ export function createNotifier(config = {}) {
     if (previous === null) {
       db.prepare(`DELETE FROM meta WHERE key = 'digest_last_sent'`).run();
     } else {
-      db.prepare(`UPDATE meta SET value = ? WHERE key = 'digest_last_sent'`).run(previous);
+      db.prepare(
+        `UPDATE meta SET value = ? WHERE key = 'digest_last_sent'`,
+      ).run(previous);
     }
     return false;
   }
 
+  async function sweepFollowUps(db) {
+    if (!settings.enabled || !settings.events?.has('ticket.follow_up'))
+      return [];
+    const due = followUps(db),
+      sent = [];
+    for (const ticket of due) {
+      const claimed = db
+        .prepare(
+          "UPDATE tickets SET follow_up_notified_at = datetime('now') WHERE id = ? AND follow_up_notified_at IS NULL",
+        )
+        .run(ticket.id);
+      if (claimed.changes && (await send('ticket.follow_up', ticket)))
+        sent.push(ticket.id);
+    }
+    return sent;
+  }
   return {
     send,
+    sweepFollowUps,
     sendDetached,
     sweepOverdue,
     sweepDueSoon,
@@ -209,6 +244,8 @@ export function createNotifier(config = {}) {
           priority: ticket.priority,
           device: ticket.device_name ?? null,
           due_date: ticket.due_date ?? null,
+          waiting_on: ticket.waiting_on ?? null,
+          follow_up_date: ticket.follow_up_date ?? null,
         },
       }),
     };
@@ -218,7 +255,11 @@ export function createNotifier(config = {}) {
     return {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'digest', subject: digestSubject(summary), ...summary }),
+      body: JSON.stringify({
+        event: 'digest',
+        subject: digestSubject(summary),
+        ...summary,
+      }),
     };
   }
 
@@ -226,11 +267,16 @@ export function createNotifier(config = {}) {
     const lines = [
       `${summary.open} open · ${summary.overdue} overdue · ${summary.stale} stale`,
       ...summary.upcoming.map((t) => `• ${t.due_date}  ${t.title}`),
+      ...summary.follow_ups.map(
+        (t) => `Follow up: ${t.title} — ${t.waiting_on}`,
+      ),
     ];
     return {
       method: 'POST',
       headers: {
-        Title: digestSubject(summary).replace(/[\r\n]+/g, ' ').slice(0, 200),
+        Title: digestSubject(summary)
+          .replace(/[\r\n]+/g, ' ')
+          .slice(0, 200),
         Priority: summary.overdue > 0 ? '4' : '3',
         Tags: 'clipboard',
       },
@@ -271,26 +317,40 @@ function buildDigest(db) {
   const scalar = (sql) => Object.values(db.prepare(sql).get())[0];
 
   return {
-    open: scalar(`SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})`),
+    follow_ups: followUps(db),
+    open: scalar(
+      `SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})`,
+    ),
     overdue: scalar(
       `SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})
-         AND due_date IS NOT NULL AND due_date < date('now')`,
+         AND due_date IS NOT NULL AND due_date < app_today()`,
     ),
     stale: scalar(
       `SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})
-         AND queue = 'next' AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`,
+         AND queue = 'next' AND (snoozed_until IS NULL OR snoozed_until <= app_today()) AND (waiting_on IS NULL OR follow_up_date <= app_today()) AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`,
     ),
     upcoming: db
       .prepare(
         `SELECT id, title, priority, due_date FROM tickets
           WHERE status NOT IN (${CLOSED_LIST})
             AND due_date IS NOT NULL
-            AND due_date >= date('now')
-            AND due_date <= date('now', '+7 days')
+            AND due_date >= app_today()
+            AND due_date <= date(app_today(), '+7 days')
           ORDER BY due_date ASC LIMIT 10`,
       )
       .all(),
   };
+}
+
+export function followUps(db) {
+  const today = dateFor(db);
+  return db
+    .prepare(
+      `SELECT id,title,priority,status,waiting_on,follow_up_date FROM tickets
+    WHERE status NOT IN (${CLOSED_LIST}) AND waiting_on IS NOT NULL AND follow_up_date <= ?
+      AND (snoozed_until IS NULL OR snoozed_until <= ?) ORDER BY follow_up_date,id`,
+    )
+    .all(today, today);
 }
 
 function digestSubject({ open, overdue }) {

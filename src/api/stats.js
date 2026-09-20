@@ -1,4 +1,5 @@
 import { CLOSED_STATUSES } from '../validate.js';
+import { followUps } from '../notify.js';
 
 const CLOSED_LIST = CLOSED_STATUSES.map((s) => `'${s}'`).join(', ');
 
@@ -7,13 +8,19 @@ const STALE_AFTER_DAYS = 14;
 
 /** Everything the dashboard needs, in one round trip. */
 export function getStats(db) {
-  const scalar = (sql, params = []) => Object.values(db.prepare(sql).get(...params))[0];
+  const scalar = (sql, params = []) =>
+    Object.values(db.prepare(sql).get(...params))[0];
 
   return {
-    open_tickets: scalar(`SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})`),
+    follow_ups: followUps(db),
+    open_tickets: scalar(
+      `SELECT COUNT(*) FROM tickets WHERE status NOT IN (${CLOSED_LIST})`,
+    ),
     total_tickets: scalar('SELECT COUNT(*) FROM tickets'),
     total_devices: scalar('SELECT COUNT(*) FROM devices'),
-    active_devices: scalar(`SELECT COUNT(*) FROM devices WHERE status = 'active'`),
+    active_devices: scalar(
+      `SELECT COUNT(*) FROM devices WHERE status = 'active'`,
+    ),
 
     by_status: db
       .prepare('SELECT status, COUNT(*) AS count FROM tickets GROUP BY status')
@@ -44,7 +51,7 @@ export function getStats(db) {
         `SELECT id, title, priority, due_date FROM tickets
           WHERE status NOT IN (${CLOSED_LIST})
             AND due_date IS NOT NULL
-            AND due_date < date('now')
+            AND due_date < app_today()
           ORDER BY due_date ASC`,
       )
       .all(),
@@ -53,7 +60,7 @@ export function getStats(db) {
       .prepare(
         `SELECT id, title, priority, updated_at FROM tickets
           WHERE status NOT IN (${CLOSED_LIST})
-            AND queue = 'next' AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')
+            AND queue = 'next' AND (snoozed_until IS NULL OR snoozed_until <= app_today()) AND (waiting_on IS NULL OR follow_up_date <= app_today()) AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')
           ORDER BY updated_at ASC
           LIMIT 10`,
       )

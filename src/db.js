@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { configureDates } from './dates.js';
 
 /**
  * Schema migrations, applied in order. The index in this array is the
@@ -248,6 +249,42 @@ const MIGRATIONS = [
     CHECK (queue IN ('inbox', 'next', 'someday'));
   CREATE INDEX idx_tickets_queue_status ON tickets(queue, status);
   `,
+  `
+  CREATE TABLE projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  ALTER TABLE tickets ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
+  ALTER TABLE tickets ADD COLUMN today_rank INTEGER;
+  ALTER TABLE tickets ADD COLUMN snoozed_until TEXT;
+  ALTER TABLE tickets ADD COLUMN waiting_on TEXT;
+  ALTER TABLE tickets ADD COLUMN follow_up_date TEXT;
+  ALTER TABLE tickets ADD COLUMN follow_up_notified_at TEXT;
+  CREATE INDEX idx_tickets_project ON tickets(project_id);
+  CREATE TABLE checklist_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL
+  );
+  CREATE INDEX idx_checklist_ticket ON checklist_items(ticket_id, position);
+  CREATE TABLE saved_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+    filters TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0
+  );
+  ALTER TABLE schedules ADD COLUMN recurrence TEXT;
+  ALTER TABLE schedules ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
+  ALTER TABLE schedules ADD COLUMN checklist TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE schedules ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC';
+  CREATE TABLE submissions (
+    scope TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, resource_id INTEGER NOT NULL,
+    PRIMARY KEY(scope, key)
+  );
+  `,
+  `
+  ALTER TABLE schedules ADD COLUMN last_due TEXT;
+  UPDATE schedules SET last_due = next_due WHERE recurrence IS NOT NULL AND last_ticket_id IS NOT NULL;
+  `,
 ];
 
 /**
@@ -260,6 +297,7 @@ export function openDatabase(path) {
   }
 
   const db = new DatabaseSync(path);
+  configureDates(db);
   db.exec('PRAGMA foreign_keys = ON');
   if (path !== ':memory:') {
     // WAL survives restarts and lets reads proceed during writes. It is not

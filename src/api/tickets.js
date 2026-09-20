@@ -1,6 +1,13 @@
 import { transaction } from '../db.js';
 import { recordEvent, recordChanges, listEvents } from './events.js';
 import {
+  planningFields,
+  normalizePlanning,
+  planningFilter,
+} from './planning.js';
+import { syncRecurrence } from '../recurrence.js';
+import { dateFor } from '../dates.js';
+import {
   CLOSED_STATUSES,
   PRIORITIES,
   TICKET_STATUSES,
@@ -28,6 +35,9 @@ const SELECT_TICKET = `
   SELECT t.*,
          d.name AS device_name,
          d.type AS device_type,
+         (SELECT name FROM projects WHERE id = t.project_id) AS project_name,
+         (SELECT count(*) FROM checklist_items WHERE ticket_id = t.id) AS checklist_total,
+         (SELECT count(*) FROM checklist_items WHERE ticket_id = t.id AND completed = 1) AS checklist_completed,
          (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id) AS comment_count,
          (SELECT group_concat(tg.name) FROM ticket_tags tt
             JOIN tags tg ON tg.id = tt.tag_id
@@ -37,6 +47,7 @@ const SELECT_TICKET = `
 `;
 
 const SORTS = {
+  today: 't.today_rank, t.id',
   priority: `${PRIORITY_RANK}, t.created_at DESC, t.id DESC`,
   newest: 't.created_at DESC, t.id DESC',
   oldest: 't.created_at ASC, t.id ASC',
@@ -48,6 +59,7 @@ const SORTS = {
 export function listTickets(db, query = {}) {
   const where = [];
   const params = {};
+  planningFilter(query, where, params, dateFor(db));
 
   // `status=active` is the default view: everything still needing attention.
   if (query.status === 'active' || (!query.status && query.status !== '')) {
@@ -83,7 +95,9 @@ export function listTickets(db, query = {}) {
     // substring match rather than returning nothing.
     const fts = toFtsQuery(query.q);
     if (fts) {
-      where.push('t.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH :q)');
+      where.push(
+        't.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH :q)',
+      );
       params.q = fts;
     } else {
       where.push('(t.title LIKE :q OR t.body LIKE :q)');
@@ -105,11 +119,15 @@ export function getTicket(db, id) {
   if (!row) throw new NotFoundError(`No ticket with id ${id}`);
 
   const comments = db
-    .prepare('SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC, id ASC')
+    .prepare(
+      'SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC, id ASC',
+    )
     .all(id);
 
   const links = db
-    .prepare('SELECT * FROM ticket_links WHERE ticket_id = ? ORDER BY created_at ASC, id ASC')
+    .prepare(
+      'SELECT * FROM ticket_links WHERE ticket_id = ? ORDER BY created_at ASC, id ASC',
+    )
     .all(id);
 
   const attachments = db
@@ -119,7 +137,19 @@ export function getTicket(db, id) {
     )
     .all(id);
 
-  return { ...shapeTicket(row), comments, links, attachments, events: listEvents(db, id) };
+  const checklist = db
+    .prepare(
+      'SELECT * FROM checklist_items WHERE ticket_id = ? ORDER BY position, id',
+    )
+    .all(id);
+  return {
+    ...shapeTicket(row),
+    comments,
+    links,
+    attachments,
+    checklist,
+    events: listEvents(db, id),
+  };
 }
 
 /**
@@ -131,16 +161,20 @@ export function createTicket(db, input = {}, { scheduleId = null } = {}) {
   const tags = tagList(input.tags) ?? [];
 
   if (fields.device_id !== null) assertDeviceExists(db, fields.device_id);
-  fields.resolved_at = CLOSED_STATUSES.includes(fields.status) ? isoNow() : null;
+  fields.resolved_at = CLOSED_STATUSES.includes(fields.status)
+    ? isoNow()
+    : null;
   fields.schedule_id = scheduleId;
+  normalizePlanning(db, fields, input);
 
   return transaction(db, () => {
     const { lastInsertRowid } = db
       .prepare(
-        `INSERT INTO tickets
-           (title, body, status, priority, device_id, due_date, resolved_at, schedule_id, queue)
-         VALUES
-           (:title, :body, :status, :priority, :device_id, :due_date, :resolved_at, :schedule_id, :queue)`,
+        `INSERT INTO tickets (${Object.keys(fields).join(',')}) VALUES (${Object.keys(
+          fields,
+        )
+          .map((key) => ':' + key)
+          .join(',')})`,
       )
       .run(fields);
 
@@ -161,10 +195,14 @@ export function updateTicket(db, id, input = {}) {
     throw new ValidationError('No updatable fields provided');
   }
   if (fields.device_id) assertDeviceExists(db, fields.device_id);
+  normalizePlanning(db, fields, input, existing);
 
   // Moving the due date re-arms both date alarms: a ticket deferred to next
   // month should be nudged again as it nears, and announced again if it lapses.
-  if (Object.hasOwn(fields, 'due_date') && fields.due_date !== existing.due_date) {
+  if (
+    Object.hasOwn(fields, 'due_date') &&
+    fields.due_date !== existing.due_date
+  ) {
     fields.overdue_notified_at = null;
     fields.due_soon_notified_at = null;
   }
@@ -200,10 +238,15 @@ export function updateTicket(db, id, input = {}) {
     if (tags !== null) {
       const before = existing.tags.join(', ');
       const after = [...tags].sort().join(', ');
-      if (before !== after) recordEvent(db, id, 'tags', before || null, after || null);
+      if (before !== after)
+        recordEvent(db, id, 'tags', before || null, after || null);
       setTags(db, id, tags);
-      db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(id);
+      db.prepare(
+        `UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`,
+      ).run(id);
     }
+    if (existing.is_open && CLOSED_STATUSES.includes(fields.status))
+      syncRecurrence(db, id);
     return getTicket(db, id);
   });
 }
@@ -233,7 +276,9 @@ export function bulkUpdateTickets(db, input = {}) {
   // updated nor counted twice, and the batch limit reflects the real work.
   const clean = [...new Set(ids.map((id) => requiredId(id, 'id')))];
   if (clean.length > MAX_BULK) {
-    throw new ValidationError(`Cannot update more than ${MAX_BULK} tickets at once`);
+    throw new ValidationError(
+      `Cannot update more than ${MAX_BULK} tickets at once`,
+    );
   }
 
   const { ids: _ids, add_tags, ...patch } = input;
@@ -246,7 +291,10 @@ export function bulkUpdateTickets(db, input = {}) {
     const updated = clean.map((id) => {
       if (addTags && addTags.length > 0) {
         const current = getTicket(db, id).tags;
-        return updateTicket(db, id, { ...patch, tags: [...new Set([...current, ...addTags])] });
+        return updateTicket(db, id, {
+          ...patch,
+          tags: [...new Set([...current, ...addTags])],
+        });
       }
       return updateTicket(db, id, patch);
     });
@@ -263,8 +311,12 @@ export function addComment(db, ticketId, input = {}) {
       .prepare('INSERT INTO comments (ticket_id, body) VALUES (?, ?)')
       .run(ticketId, body);
     // A new comment counts as activity on the ticket.
-    db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(ticketId);
-    return db.prepare('SELECT * FROM comments WHERE id = ?').get(Number(lastInsertRowid));
+    db.prepare(
+      `UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`,
+    ).run(ticketId);
+    return db
+      .prepare('SELECT * FROM comments WHERE id = ?')
+      .get(Number(lastInsertRowid));
   });
 }
 
@@ -272,7 +324,10 @@ export function deleteComment(db, ticketId, commentId) {
   const comment = db
     .prepare('SELECT * FROM comments WHERE id = ? AND ticket_id = ?')
     .get(commentId, ticketId);
-  if (!comment) throw new NotFoundError(`No comment with id ${commentId} on ticket ${ticketId}`);
+  if (!comment)
+    throw new NotFoundError(
+      `No comment with id ${commentId} on ticket ${ticketId}`,
+    );
   db.prepare('DELETE FROM comments WHERE id = ?').run(commentId);
 }
 
@@ -284,10 +339,16 @@ export function addLink(db, ticketId, input = {}) {
 
   return transaction(db, () => {
     const { lastInsertRowid } = db
-      .prepare('INSERT INTO ticket_links (ticket_id, url, label) VALUES (?, ?, ?)')
+      .prepare(
+        'INSERT INTO ticket_links (ticket_id, url, label) VALUES (?, ?, ?)',
+      )
       .run(ticketId, url, label);
-    db.prepare(`UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`).run(ticketId);
-    return db.prepare('SELECT * FROM ticket_links WHERE id = ?').get(Number(lastInsertRowid));
+    db.prepare(
+      `UPDATE tickets SET updated_at = datetime('now') WHERE id = ?`,
+    ).run(ticketId);
+    return db
+      .prepare('SELECT * FROM ticket_links WHERE id = ?')
+      .get(Number(lastInsertRowid));
   });
 }
 
@@ -295,7 +356,8 @@ export function deleteLink(db, ticketId, linkId) {
   const link = db
     .prepare('SELECT 1 FROM ticket_links WHERE id = ? AND ticket_id = ?')
     .get(linkId, ticketId);
-  if (!link) throw new NotFoundError(`No link with id ${linkId} on ticket ${ticketId}`);
+  if (!link)
+    throw new NotFoundError(`No link with id ${linkId} on ticket ${ticketId}`);
   db.prepare('DELETE FROM ticket_links WHERE id = ?').run(linkId);
 }
 
@@ -314,21 +376,29 @@ export function listTags(db) {
 }
 
 function parseTicket(input, { partial }) {
-  const fields = {};
+  const fields = planningFields(input, partial);
   const has = (key) => Object.hasOwn(input, key);
 
-  if (!partial || has('title')) fields.title = requiredText(input.title, 'title', 200);
+  if (!partial || has('title'))
+    fields.title = requiredText(input.title, 'title', 200);
   if (!partial || has('body')) fields.body = bodyText(input.body, 'body');
-  if (!partial || has('status')) fields.status = oneOf(input.status, TICKET_STATUSES, 'status', 'open');
+  if (!partial || has('status'))
+    fields.status = oneOf(input.status, TICKET_STATUSES, 'status', 'open');
   if (!partial || has('queue')) {
-    fields.queue = input.queue === undefined && !partial
-      ? 'next' : oneOf(input.queue, TICKET_QUEUES, 'queue');
+    fields.queue =
+      input.queue === undefined && !partial
+        ? 'next'
+        : oneOf(input.queue, TICKET_QUEUES, 'queue');
   }
   if (!partial || has('priority')) {
     fields.priority = oneOf(input.priority, PRIORITIES, 'priority', 'medium');
   }
-  if (!partial || has('device_id')) fields.device_id = optionalId(input.device_id, 'device_id');
-  if (!partial || has('due_date')) fields.due_date = optionalDate(input.due_date, 'due_date');
+  if (!partial || has('device_id'))
+    fields.device_id = optionalId(input.device_id, 'device_id');
+  if (!partial || has('due_date'))
+    fields.due_date = optionalDate(input.due_date, 'due_date');
+  // An explicit Today toggle is itself an update, normalized with current state.
+  if (has('today')) fields.today_rank = null;
 
   return fields;
 }
@@ -339,7 +409,9 @@ function setTags(db, ticketId, tags) {
 
   const insertTag = db.prepare('INSERT OR IGNORE INTO tags (name) VALUES (?)');
   const findTag = db.prepare('SELECT id FROM tags WHERE name = ?');
-  const link = db.prepare('INSERT INTO ticket_tags (ticket_id, tag_id) VALUES (?, ?)');
+  const link = db.prepare(
+    'INSERT INTO ticket_tags (ticket_id, tag_id) VALUES (?, ?)',
+  );
 
   for (const tag of tags) {
     insertTag.run(tag);
@@ -355,7 +427,10 @@ function assertDeviceExists(db, deviceId) {
 /** The name of a device by id, or null — used to snapshot events readably. */
 function deviceName(db, deviceId) {
   if (!deviceId) return null;
-  return db.prepare('SELECT name FROM devices WHERE id = ?').get(deviceId)?.name ?? null;
+  return (
+    db.prepare('SELECT name FROM devices WHERE id = ?').get(deviceId)?.name ??
+    null
+  );
 }
 
 /** Turns the group_concat CSV into a real array for the client. */
