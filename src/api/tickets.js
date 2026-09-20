@@ -4,6 +4,7 @@ import {
   CLOSED_STATUSES,
   PRIORITIES,
   TICKET_STATUSES,
+  TICKET_QUEUES,
   NotFoundError,
   ValidationError,
   bodyText,
@@ -36,9 +37,10 @@ const SELECT_TICKET = `
 `;
 
 const SORTS = {
-  priority: `${PRIORITY_RANK}, t.created_at DESC`,
-  newest: 't.created_at DESC',
-  oldest: 't.created_at ASC',
+  priority: `${PRIORITY_RANK}, t.created_at DESC, t.id DESC`,
+  newest: 't.created_at DESC, t.id DESC',
+  oldest: 't.created_at ASC, t.id ASC',
+  completed: 't.resolved_at DESC, t.id DESC',
   updated: 't.updated_at DESC',
   due: 't.due_date IS NULL, t.due_date ASC',
 };
@@ -50,11 +52,17 @@ export function listTickets(db, query = {}) {
   // `status=active` is the default view: everything still needing attention.
   if (query.status === 'active' || (!query.status && query.status !== '')) {
     where.push(`t.status NOT IN (${CLOSED_LIST})`);
+  } else if (query.status === 'done') {
+    where.push(`t.status IN (${CLOSED_LIST})`);
   } else if (query.status && query.status !== 'all') {
     where.push('t.status = :status');
     params.status = oneOf(query.status, TICKET_STATUSES, 'status');
   }
 
+  if (query.queue !== undefined) {
+    where.push('t.queue = :queue');
+    params.queue = oneOf(query.queue, TICKET_QUEUES, 'queue');
+  }
   if (query.priority) {
     where.push('t.priority = :priority');
     params.priority = oneOf(query.priority, PRIORITIES, 'priority');
@@ -130,9 +138,9 @@ export function createTicket(db, input = {}, { scheduleId = null } = {}) {
     const { lastInsertRowid } = db
       .prepare(
         `INSERT INTO tickets
-           (title, body, status, priority, device_id, due_date, resolved_at, schedule_id)
+           (title, body, status, priority, device_id, due_date, resolved_at, schedule_id, queue)
          VALUES
-           (:title, :body, :status, :priority, :device_id, :due_date, :resolved_at, :schedule_id)`,
+           (:title, :body, :status, :priority, :device_id, :due_date, :resolved_at, :schedule_id, :queue)`,
       )
       .run(fields);
 
@@ -312,6 +320,10 @@ function parseTicket(input, { partial }) {
   if (!partial || has('title')) fields.title = requiredText(input.title, 'title', 200);
   if (!partial || has('body')) fields.body = bodyText(input.body, 'body');
   if (!partial || has('status')) fields.status = oneOf(input.status, TICKET_STATUSES, 'status', 'open');
+  if (!partial || has('queue')) {
+    fields.queue = input.queue === undefined && !partial
+      ? 'next' : oneOf(input.queue, TICKET_QUEUES, 'queue');
+  }
   if (!partial || has('priority')) {
     fields.priority = oneOf(input.priority, PRIORITIES, 'priority', 'medium');
   }

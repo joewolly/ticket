@@ -124,9 +124,17 @@ jobs:
       - name: Build the image
         run: docker build -t homelab-ticket:ci .
 
+      - name: Validate default and private Compose configurations
+        env:
+          AUTH_PASSWORD: ci-test-passphrase
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.private.yml config --quiet
+
       - name: Run it and wait for the healthcheck to pass
         run: |
-          docker run -d --name ticket -p 8080:8080 \
+          docker run -d --name ticket -p 127.0.0.1:8080:8080 \
+            -v ticket-ci-data:/data -v ticket-ci-backups:/backups \
             -e AUTH_PASSWORD=ci-test-passphrase \
             homelab-ticket:ci
 
@@ -150,6 +158,68 @@ jobs:
       - name: Confirm it runs unprivileged
         run: |
           test "$(docker exec ticket id -u)" != "0" || { echo "running as root"; exit 1; }
+
+      - name: Snapshot tasks and attachments on the separate backup volume
+        run: |
+          docker exec -i ticket node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { copyFileSync } from 'node:fs';
+          import { openDatabase } from './src/db.js';
+          import { createTicket } from './src/api/tickets.js';
+          import { addAttachment } from './src/api/attachments.js';
+          import { runBackup } from './src/backup.js';
+          const db = openDatabase('/data/homelab.db');
+          const task = createTicket(db, { title: 'Docker restore proof', queue: 'inbox' });
+          addAttachment(db, task.id, { filename: 'proof.txt', contentType: 'text/plain', data: Buffer.from('restore proof') });
+          const snapshot = await runBackup(db, { dir: '/backups', keep: 14 });
+          assert.ok(snapshot.bytes > 0);
+          copyFileSync(snapshot.file, '/backups/restore-test.db');
+          db.close();
+          JS
+
+      - name: Verify persistence after container restart
+        run: |
+          docker restart ticket
+          for i in $(seq 1 30); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' ticket)
+            [ "$state" = "healthy" ] && break
+            [ "$state" = "unhealthy" ] && { docker logs ticket; exit 1; }
+            sleep 2
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' ticket)" = "healthy"
+          docker exec -i ticket node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const base = 'http://127.0.0.1:8080';
+          const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: process.env.AUTH_PASSWORD }) });
+          assert.equal(login.status, 200);
+          const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
+          const list = await fetch(`${base}/api/tickets?queue=inbox`, { headers });
+          assert.equal(list.status, 200);
+          const task = (await list.json()).find((task) => task.title === 'Docker restore proof');
+          assert.equal(task.queue, 'inbox');
+          const detail = await fetch(`${base}/api/tickets/${task.id}`, { headers });
+          assert.equal(detail.status, 200);
+          const attachment = (await detail.json()).attachments.find((file) => file.filename === 'proof.txt');
+          const download = await fetch(`${base}/api/attachments/${attachment.id}`, { headers });
+          assert.equal(download.status, 200);
+          assert.equal(await download.text(), 'restore proof');
+          JS
+
+      - name: Restore snapshot in an isolated container and data volume
+        run: |
+          docker run --rm -i --entrypoint node \
+            -v ticket-ci-backups:/backups:ro -v ticket-ci-restore:/data \
+            homelab-ticket:ci --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { copyFileSync } from 'node:fs';
+          import { openDatabase } from './src/db.js';
+          copyFileSync('/backups/restore-test.db', '/data/restored.db');
+          const db = openDatabase('/data/restored.db');
+          assert.equal(db.prepare('SELECT queue FROM tickets WHERE title = ?').get('Docker restore proof').queue, 'inbox');
+          assert.equal(Buffer.from(db.prepare('SELECT data FROM attachments WHERE filename = ?').get('proof.txt').data).toString(), 'restore proof');
+          assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+          db.close();
+          JS
 
       - name: Container logs
         if: always()

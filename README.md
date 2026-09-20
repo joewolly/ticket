@@ -1,7 +1,8 @@
-# Homelab Tickets
+# Task Hub
 
-A small self-hosted ticket system and device inventory for a personal homelab.
-Track what's broken, which machine it's broken on, and what you did about it.
+A self-hosted inbox for issues, chores, ideas, and things you want to get done.
+Capture a thought now; decide what to do with it later. Device inventory and
+recurring maintenance remain available alongside everyday personal tasks.
 
 Runs as a single container with a SQLite file. **No npm dependencies** — the
 whole thing is Node's standard library, so there is nothing to install, nothing
@@ -16,12 +17,18 @@ docker compose up -d
 
 Then open <http://localhost:8080> and sign in.
 
+Compose binds to the Docker host's loopback address, enables daily backups on
+a separate volume, and retains 14 snapshots. For private phone access through
+Tailscale and the production upgrade/restore procedure, see
+[Daily-use deployment](docs/deployment.md). On a remote Docker host, localhost
+means that host, not your computer.
+
 To run it directly instead:
 
 ```sh
 AUTH_PASSWORD=your-long-passphrase npm start   # http://localhost:8080
 npm run dev                                    # same, with auto-restart
-npm test                                       # 188 tests, no network needed
+npm test                                       # unit and integration tests, no network needed
 ```
 
 Node 22.16+ is required — for the built-in `node:sqlite` module, and
@@ -29,13 +36,41 @@ specifically for the FTS5 full-text search the ticket index relies on.
 
 ## What it does
 
+The home screen is **Inbox**. Press **Add task** (or `n`), enter a title, and
+save. Notes, tags, priorities, dates, and devices are optional details. Saving
+keeps you on the same page; the new task waits in Inbox.
+
+Review items individually or select several at once:
+
+- **Inbox:** unreviewed thoughts, oldest first.
+- **Next:** things you intend to do, ordered by priority by default.
+- **Someday:** ideas to keep without treating their age as neglected work.
+- **Done:** resolved and closed tasks, most recently completed first.
+- **All:** every task, including completed work.
+
+Move items to Next or Someday, or mark them Done. Reopening in the UI returns a
+task to Next with open status using the Reopen action. Choosing an active status
+in the detail dropdown also moves it to Next and preserves that selected status.
+Moving a completed task between queues does not
+reopen it. Search covers titles, descriptions, and notes across **all lists**,
+including Done; other selected filters such as tags still apply. Each result
+shows its list. Tags such as `home`, `tech`, and `personal` are optional.
+
+Queue placement is separate from progress status. Existing records migrate to
+Next without changing their status or history. Existing API callers and
+automatically generated maintenance/warranty tasks also default to Next.
+Only Next tasks can become **stale** after 14 days. An explicit deadline is
+still honored in every queue, including Inbox and Someday.
+
+The app requires a connection to the server. It does not queue offline edits.
+
 **Tickets** carry a status (`open`, `in_progress`, `blocked`, `resolved`,
 `closed`), a priority, optional tags, an optional due date, reference links,
 file attachments, and a comment thread for notes as you work the problem. Every
 change is logged to an **activity timeline**, so a ticket that sat blocked for
 three weeks no longer looks the same as one fixed on the spot. Descriptions and
-notes render **Markdown**. The default list view shows only what still needs
-attention, sorted most urgent first, and lets you **select several at once** to
+notes render **Markdown**. The Next list shows work you intend to do,
+sorted most urgent first, and lets you **select several at once** to
 close, resolve, or tag them in one go. A **full-text search** covers titles,
 descriptions, and every comment.
 
@@ -55,10 +90,11 @@ a real ticket when the work comes due. See [Recurring maintenance](#recurring-ma
 
 **The dashboard** surfaces open counts by priority, which devices have the most
 unresolved work, anything overdue, and anything open that hasn't been touched
-in two weeks — the tickets you forgot rather than finished.
+in two weeks in Next — the tasks you forgot rather than finished.
 
-Everything is also reachable by keyboard: `n` for a new ticket, `/` to search,
-`g` then `d`/`t`/`v`/`s` to move between pages, and `?` for the full list.
+Everything is also reachable by keyboard: `n` to add a task, `/` to search,
+`g` then `i`/`d`/`t`/`v`/`s` for Inbox/dashboard/all tasks/devices/schedules,
+and `?` for the full list.
 
 ## Attachments
 
@@ -193,6 +229,11 @@ date re-arms the alert.
 
 ## Backups
 
+Docker Compose enables daily snapshots in the `ticket-backups` volume mounted
+at `/backups`, retaining 14. This separate volume is still on the same server;
+off-server backup is not configured by this project. Direct Node startup keeps
+backups disabled until a directory is configured.
+
 Everything is in the one SQLite file. Set `BACKUP_DIR` and the app snapshots
 itself on a timer, keeping the most recent `BACKUP_KEEP` files:
 
@@ -305,10 +346,16 @@ Every endpoint except `/api/auth/login` requires either a session cookie or an
 API token; unauthenticated API calls get a `401`, and page requests redirect to
 `/login`.
 
-Ticket list filters: `status` (a specific status, or `all`; defaults to
+Ticket list filters: `queue` (`inbox`, `next`, or `someday`),
+`status` (a specific status, `done` for resolved and closed, or `all`; defaults to
 everything unresolved), `priority`, `device_id`, `tag`, `q` (full-text search
 over title, description, and comments), and `sort` (`priority`, `newest`,
-`oldest`, `updated`, `due`).
+`oldest`, `updated`, `due`, `completed`). API search retains explicit filters;
+the UI searches across lists by sending `status=all` and omitting `queue`.
+
+Create/update/bulk-update accept `queue`. Omitting it on create defaults to
+`next`; explicit invalid or empty values are rejected. Completion remains in
+`status`, not `queue`. CSV appends a `queue` column; JSON exports include it.
 
 Schedule list filters: `paused` and `device_id`.
 

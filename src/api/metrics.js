@@ -50,10 +50,10 @@ export function renderMetrics(db, { warrantyDays = 30 } = {}) {
   ]);
 
   metric('homelab_tickets_stale',
-    `Unresolved tickets with no activity for ${STALE_AFTER_DAYS} days.`, 'gauge', [
+    `Unresolved Next tasks with no activity for ${STALE_AFTER_DAYS} days.`, 'gauge', [
       ['', scalar(`SELECT COUNT(*) FROM tickets
                     WHERE status NOT IN (${CLOSED_LIST})
-                      AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`)],
+                      AND queue = 'next' AND updated_at < datetime('now', '-${STALE_AFTER_DAYS} days')`)],
     ]);
 
   metric('homelab_devices', 'Devices by status.', 'gauge',

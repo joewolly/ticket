@@ -1,16 +1,17 @@
 services:
   ticket:
     build: .
-    image: homelab-ticket
+    image: homelab-ticket:${TASK_HUB_VERSION:-latest}
     container_name: homelab-ticket
     restart: unless-stopped
     ports:
       # Change the left-hand port if 8080 is already taken on your host.
-      - "8080:8080"
+      - "127.0.0.1:${TASK_HUB_PORT:-8080}:8080"
     volumes:
       # Named volume keeps the SQLite file across container rebuilds.
       # Swap for a bind mount (e.g. ./data:/data) if you back up by file.
       - ticket-data:/data
+      - ticket-backups:/backups
     # Values come from a .env file next to this one — see .env.example.
     # The container refuses to start unless AUTH_PASSWORD is set, or you opt
     # out of authentication deliberately with AUTH_DISABLED=true.
@@ -31,12 +32,15 @@ services:
       NOTIFY_EVENTS: ${NOTIFY_EVENTS:-}
       NOTIFY_MIN_PRIORITY: ${NOTIFY_MIN_PRIORITY:-}
       NOTIFY_TIMEOUT_MS: ${NOTIFY_TIMEOUT_MS:-}
-      # Backups land on the same volume as the database by default. Point this
-      # at a second mount if you want them on different hardware.
-      BACKUP_DIR: ${BACKUP_DIR:-}
-      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-}
-      BACKUP_KEEP: ${BACKUP_KEEP:-}
+      NOTIFY_REMINDER_DAYS: ${NOTIFY_REMINDER_DAYS:-}
+      NOTIFY_DIGEST: ${NOTIFY_DIGEST:-}
+      # Separate volume, same server: this does not protect against host loss.
+      BACKUP_DIR: ${BACKUP_DIR:-/backups}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
       MAINTENANCE_INTERVAL_MINUTES: ${MAINTENANCE_INTERVAL_MINUTES:-}
+      WARRANTY_ALERT_DAYS: ${WARRANTY_ALERT_DAYS:-}
 
 volumes:
   ticket-data:
+  ticket-backups:

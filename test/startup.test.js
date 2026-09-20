@@ -103,10 +103,17 @@ test('the executable serves authenticated requests and preserves tickets across 
     const created = await fetch(`${app.base}/api/tickets`, {
       method: 'POST',
       headers: { Cookie: cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'Survives executable restart', priority: 'high' }),
+      body: JSON.stringify({ title: 'Survives executable restart', priority: 'high', queue: 'inbox' }),
     });
     assert.equal(created.status, 201);
     const ticket = await created.json();
+    const attachment = await fetch(`${app.base}/api/tickets/${ticket.id}/attachments`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'text/plain', 'X-Filename': 'restart.txt' },
+      body: 'Attachment survives executable restart',
+    });
+    assert.equal(attachment.status, 201);
+    const attachmentId = (await attachment.json()).id;
     const exported = await fetch(`${app.base}/api/export?entity=tickets&format=csv`, {
       headers: { Cookie: cookie },
     });
@@ -122,7 +129,12 @@ test('the executable serves authenticated requests and preserves tickets across 
       headers: { Cookie: await login() },
     });
     assert.equal(restored.status, 200);
-    assert.equal((await restored.json()).title, ticket.title);
+    const restoredTask = await restored.json();
+    assert.equal(restoredTask.title, ticket.title);
+    assert.equal(restoredTask.queue, 'inbox');
+    const download = await fetch(`${app.base}/api/attachments/${attachmentId}`, { headers: { Cookie: await login() } });
+    assert.equal(download.status, 200);
+    assert.equal(await download.text(), 'Attachment survives executable restart');
   } finally {
     if (app) await app.stop();
     await rm(scratch, { recursive: true, force: true });

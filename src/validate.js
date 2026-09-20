@@ -13,6 +13,7 @@ export const DEVICE_TYPES = [
 export const DEVICE_STATUSES = ['active', 'spare', 'retired'];
 
 export const TICKET_STATUSES = ['open', 'in_progress', 'blocked', 'resolved', 'closed'];
+export const TICKET_QUEUES = ['inbox', 'next', 'someday'];
 
 /** Statuses that mean the ticket no longer needs attention. */
 export const CLOSED_STATUSES = ['resolved', 'closed'];
