@@ -17,11 +17,13 @@ import {
 import {
   createSchedule,
   getSchedule,
+  updateSchedule,
   runSchedules,
 } from '../src/api/schedules.js';
 import { nextOccurrence } from '../src/recurrence.js';
 import { civilDate, addDays } from '../src/dates.js';
 import { submitOnce } from '../src/submissions.js';
+import { renderCalendar } from '../src/api/calendar.js';
 
 function database(t) {
   const db = openDatabase(':memory:');
@@ -192,4 +194,58 @@ test('reopening older history cannot generate a parallel unfinished recurrence',
   updateTicket(db, second.id, { status: 'resolved' });
   assert.equal(runSchedules(db, { today: addDays(today, 5) }).length, 0);
   assert.equal(getSchedule(db, s.id).last_ticket_id, second.id);
+});
+
+test('editing an open routine honors the new start without changing its current task or skipping the successor', (t) => {
+  const db = database(t),
+    today = civilDate();
+  for (const rule of [
+    { kind: 'monthly_date', day: 15 },
+    { kind: 'interval', days: 7 },
+  ]) {
+    const schedule = createSchedule(db, {
+      title: 'Edited routine',
+      next_due: today,
+      recurrence: { kind: 'interval', days: 7 },
+    });
+    const task = runSchedules(db, { today })[0].ticket;
+    const edited = updateSchedule(db, schedule.id, {
+      next_due: addDays(today, 60),
+      recurrence: rule,
+    });
+    updateSchedule(db, schedule.id, { title: 'Renamed routine' });
+    updateTicket(db, task.id, { status: 'resolved' });
+    assert.equal(getSchedule(db, schedule.id).next_due, edited.next_due);
+    assert.equal(getTicket(db, task.id).due_date, today);
+    updateTicket(db, task.id, { status: 'open' });
+    updateTicket(db, task.id, { status: 'resolved' });
+    assert.equal(getSchedule(db, schedule.id).next_due, edited.next_due);
+    assert.equal(
+      runSchedules(db, { today: addDays(edited.next_due, -1) }).length,
+      0,
+    );
+    assert.equal(runSchedules(db, { today: edited.next_due }).length, 1);
+  }
+});
+
+test('calendar suppresses snoozed follow-ups while retaining deadlines and restores them when snooze expires', (t) => {
+  const db = database(t),
+    today = civilDate();
+  const task = createTicket(db, {
+    title: 'Waiting for reply',
+    waiting_on: 'Supplier',
+    follow_up_date: today,
+    due_date: today,
+    snoozed_until: addDays(today, 7),
+  });
+  assert.doesNotMatch(
+    renderCalendar(db),
+    new RegExp(`UID:followup-${task.id}@homelab`),
+  );
+  assert.match(renderCalendar(db), new RegExp(`UID:ticket-${task.id}@homelab`));
+  updateTicket(db, task.id, { snoozed_until: today });
+  assert.match(
+    renderCalendar(db),
+    new RegExp(`UID:followup-${task.id}@homelab`),
+  );
 });

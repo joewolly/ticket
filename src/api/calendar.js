@@ -65,7 +65,7 @@ export function renderCalendar(db, { now = new Date() } = {}) {
     );
   }
 
-  for (const task of db.prepare(`SELECT id,title,waiting_on,follow_up_date FROM tickets WHERE status NOT IN (${CLOSED_LIST}) AND waiting_on IS NOT NULL AND follow_up_date IS NOT NULL`).all()) {
+  for (const task of db.prepare(`SELECT id,title,waiting_on,follow_up_date FROM tickets WHERE status NOT IN (${CLOSED_LIST}) AND waiting_on IS NOT NULL AND follow_up_date IS NOT NULL AND (snoozed_until IS NULL OR snoozed_until <= app_today())`).all()) {
     lines.push(...event({ uid: `followup-${task.id}@homelab`, stamp, date: task.follow_up_date, summary: `Follow up: ${task.title}`, description: task.waiting_on }));
   }
   lines.push('END:VCALENDAR');

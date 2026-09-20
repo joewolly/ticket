@@ -68,6 +68,10 @@ contains a task template, optional project/device/tags, and checklist steps.
 New occurrences receive fresh unchecked copies of those steps. Later template
 changes do not rewrite existing tasks.
 
+Editing a calendar or fixed-interval routine's start date makes that date the
+first eligible successor after the current task is completed. Its existing
+deadline is preserved; completing it early does not skip the edited start.
+
 Supported rules:
 
 | Rule | Behavior |

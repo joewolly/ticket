@@ -104,6 +104,23 @@ export function updateSchedule(db, id, input = {}) {
   const existing = getSchedule(db, id);
 
   const fields = parseSchedule(db, input, { partial: true, existing });
+  const rule = Object.hasOwn(fields, 'recurrence')
+    ? fields.recurrence && JSON.parse(fields.recurrence)
+    : existing.recurrence;
+  if (
+    rule &&
+    existing.last_ticket_id &&
+    fields.next_due &&
+    (fields.next_due !== existing.next_due ||
+      JSON.stringify(rule) !== JSON.stringify(existing.recurrence))
+  ) {
+    // An edited start is the first eligible successor, not an occurrence
+    // already consumed. Keep the current task's deadline/history unchanged.
+    fields.last_due = addDays(
+      fields.next_due,
+      rule.kind === 'interval' ? -rule.days : -1,
+    );
+  }
   const keys = Object.keys(fields);
   if (keys.length === 0)
     throw new ValidationError('No updatable fields provided');
