@@ -39,6 +39,8 @@ import {
   updateSchedule,
   deleteSchedule,
   runSchedules,
+  getChoreRoster,
+  updateHouseholdMember,
 } from './api/schedules.js';
 import { exportEntity } from './api/export.js';
 import { renderMetrics } from './api/metrics.js';
@@ -186,6 +188,12 @@ const ROUTES = [
   ['GET', '/api/calendar.ics', sendCalendar],
   ['GET', '/api/export', sendExport],
   ['POST', '/api/maintenance/run', runMaintenance, 200],
+  ['GET', '/api/chores', readChoreRoster],
+  [
+    'PATCH',
+    '/api/chores/members/:id',
+    ({ db, params, body }) => updateHouseholdMember(db, params.id, body),
+  ],
 
   ['GET', '/api/devices', ({ db, query }) => listDevices(db, query)],
   ['POST', '/api/devices', ({ db, body }) => createDevice(db, body)],
@@ -281,6 +289,10 @@ const ROUTES = [
 /* ---- Handlers that need more than the data layer ------------------------ */
 
 function createTicketAndNotify({ db, body, notifier, req }) {
+  if (Object.hasOwn(body, 'assignee_id'))
+    throw new ValidationError(
+      'Assignments can only be changed on chore tickets',
+    );
   const { value, fresh } = submitOnce(
     db,
     'ticket',
@@ -291,6 +303,15 @@ function createTicketAndNotify({ db, body, notifier, req }) {
   );
   if (fresh) notifier.sendDetached('ticket.created', value);
   return value;
+}
+
+function readChoreRoster({ db, query, notifier }) {
+  const roster = getChoreRoster(db, { week: query.week });
+  if (roster.week_start !== getChoreRoster(db).week_start) return roster;
+  const fired = runSchedules(db, { onlyChores: true });
+  for (const { ticket } of fired)
+    notifier.sendDetached('schedule.fired', ticket);
+  return getChoreRoster(db, { week: query.week });
 }
 
 function updateTicketAndNotify({ db, params, body, notifier }) {

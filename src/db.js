@@ -285,6 +285,32 @@ const MIGRATIONS = [
   ALTER TABLE schedules ADD COLUMN last_due TEXT;
   UPDATE schedules SET last_due = next_due WHERE recurrence IS NOT NULL AND last_ticket_id IS NOT NULL;
   `,
+  `
+  -- Chores are an explicit opt-in schedule type. Existing schedules stay
+  -- routines; adding these flags must never enroll historical rows.
+  ALTER TABLE schedules ADD COLUMN is_chore INTEGER NOT NULL DEFAULT 0
+    CHECK (is_chore IN (0, 1));
+  ALTER TABLE schedules ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+    CHECK (archived IN (0, 1));
+
+  -- A fixed two-person roster shared by the household account. IDs are
+  -- intentionally stable because tickets keep their original assignee.
+  CREATE TABLE household_members (
+    id         INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT INTO household_members (id, name) VALUES
+    (1, 'Member 1'),
+    (2, 'Member 2');
+
+  ALTER TABLE tickets ADD COLUMN assignee_id INTEGER
+    REFERENCES household_members(id) ON DELETE RESTRICT;
+  ALTER TABLE tickets ADD COLUMN original_due_date TEXT;
+  CREATE INDEX idx_tickets_assignee ON tickets(assignee_id);
+  CREATE INDEX idx_tickets_original_due_date ON tickets(original_due_date);
+  `,
 ];
 
 /**

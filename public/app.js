@@ -123,6 +123,14 @@ const statusBadge = (status) =>
     label(status),
   );
 
+const choreAssigneeBadge = (ticket) =>
+  ticket.is_chore &&
+  el(
+    'span',
+    { class: 'badge chore-assignee-badge' },
+    `Chore · ${ticket.assignee_name ? `Assigned to ${ticket.assignee_name}` : 'Unassigned'}`,
+  );
+
 const priorityBadge = (priority) =>
   el(
     'span',
@@ -1055,6 +1063,7 @@ function ticketRow(ticket, onToggle) {
         ),
         statusBadge(ticket.status),
         priorityBadge(ticket.priority),
+        choreAssigneeBadge(ticket),
         ticket.device_name && el('span', {}, `· ${ticket.device_name}`),
         ticket.due_date &&
           el(
@@ -1174,6 +1183,7 @@ async function renderTicketDetail(view, id) {
             el('span', { class: 'id mono muted' }, `#${ticket.id}`),
             statusBadge(ticket.status),
             priorityBadge(ticket.priority),
+            choreAssigneeBadge(ticket),
             el(
               'span',
               { class: 'badge queue-badge' },

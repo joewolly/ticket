@@ -119,6 +119,12 @@ machine you no longer own is usually the part worth keeping.
 swaps, pool scrubs. A schedule is a ticket template plus a cadence, and it opens
 a real ticket when the work comes due. See [Recurring maintenance](#recurring-maintenance).
 
+**Shared chores** are a separate, opt-in workflow for two people using the same
+login. Chores appear on a Sunday–Saturday roster, can use the supported routine
+cadences, and keep their assignment and completion history. Existing routines
+are not converted into chores automatically, and chore assignments do not create
+person-specific alerts. See [Shared chores](docs/planning.md#shared-household-chores).
+
 **The dashboard** surfaces open counts by priority, which devices have the most
 unresolved work, anything overdue, and anything open that hasn't been touched
 in two weeks in Next — the tasks you forgot rather than finished.

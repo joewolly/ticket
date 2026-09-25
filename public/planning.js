@@ -749,7 +749,7 @@ export function recurrenceLabel(schedule) {
     : `Every ${r.days} days`;
 }
 
-export async function recurrenceModal(ticket = null, schedule = null) {
+export async function recurrenceModal(ticket = null, schedule = null, isChore = false) {
   const { el, api, field, select, openModal } = ui;
   const projects = await api('/projects'),
     devices = await api('/devices'),
@@ -849,7 +849,7 @@ export async function recurrenceModal(ticket = null, schedule = null) {
   kind.addEventListener('change', draw);
   draw();
   openModal(
-    schedule ? 'Edit routine' : 'New routine',
+    schedule ? (isChore || schedule.is_chore ? 'Edit chore' : 'Edit routine') : (isChore ? 'New chore' : 'New routine'),
     () =>
       el(
         'div',
@@ -954,6 +954,7 @@ export async function recurrenceModal(ticket = null, schedule = null) {
         project_id: data.project_id || null,
         device_id: data.device_id || null,
         recurrence,
+        ...(isChore || schedule?.is_chore ? { is_chore: true } : {}),
         checklist: data.checklist
           .split('\n')
           .map((s) => s.trim())
@@ -964,13 +965,127 @@ export async function recurrenceModal(ticket = null, schedule = null) {
         `/schedules${schedule ? '/' + schedule.id : ''}`,
         { method: schedule ? 'PATCH' : 'POST', body },
       );
-      location.hash = `#/schedules/${result.id}`;
+      location.hash = isChore || schedule?.is_chore ? '#/chores' : `#/schedules/${result.id}`;
       await ui.render();
     },
   );
 }
 
+const choreDate = (date) => new Date(`${date}T12:00:00Z`);
+const isoDate = (date) => date.toISOString().slice(0, 10);
+const shiftDate = (date, days) => { const d = choreDate(date); d.setUTCDate(d.getUTCDate() + days); return isoDate(d); };
+const weekStart = (date) => shiftDate(date, -choreDate(date).getUTCDay());
+const prettyDate = (date, options = { weekday: 'short', month: 'short', day: 'numeric' }) => choreDate(date).toLocaleDateString(undefined, options);
+
+function memberSetup(members) {
+  const { el, field, openModal } = ui;
+  openModal('People on this roster', () => el('div', {},
+    el('p', { class: 'muted' }, 'Use the names you want to see beside each week’s chores.'),
+    ...members.map((member, i) => field(`Person ${i + 1}`, el('input', { name: `member_${member.id}`, value: member.name || '', required: true, maxlength: 80 }))),
+  ), async (data) => {
+    for (const member of members) await ui.api(`/chores/members/${member.id}`, { method: 'PATCH', body: { name: data[`member_${member.id}`] } });
+    await ui.render();
+  });
+}
+
+function choreCard(item, members, today) {
+  const { el, api, field, select } = ui;
+  const overdue = item.status !== 'resolved' && item.status !== 'closed' && item.due_date < today;
+  const completed = item.status === 'resolved' || item.status === 'closed';
+  const memberOptions = members.map((m) => [m.id, m.name]);
+  const assignmentEvents = (item.events || []).filter((event) => event.kind === 'assignee');
+  const eventLine = (event) => {
+    const from = event.from_value || 'Unassigned';
+    const to = event.to_value || 'Unassigned';
+    const change = from === 'Unassigned' ? `Assigned to ${to}` : to === 'Unassigned' ? `Unassigned from ${from}` : `Reassigned from ${from} to ${to}`;
+    const timestamp = event.created_at
+      ? new Date(`${String(event.created_at).replace(' ', 'T')}Z`).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+      : '';
+    return timestamp ? `${change} · ${timestamp}` : change;
+  };
+  return el('article', { class: `chore-item${completed ? ' is-complete' : ''}${overdue ? ' is-overdue' : ''}` },
+    el('div', { class: 'chore-item-main' },
+      el('span', { class: 'chore-date' }, prettyDate(item.due_date, { weekday: 'short', month: 'short', day: 'numeric' })),
+      el('div', { class: 'chore-copy' },
+        el('a', { class: 'chore-title', href: `#/tickets/${item.id}` }, item.title),
+        el('span', { class: `chore-status${overdue ? ' overdue' : ''}` }, completed ? 'Done' : overdue ? 'Overdue' : (item.status === 'in_progress' ? 'In progress' : item.status === 'blocked' ? 'Blocked' : 'To do')),
+      ),
+      field('Assigned to', select(`assignee_${item.id}`, memberOptions, item.assignee_id, ui.guard(async (e) => {
+        await api(`/tickets/${item.id}`, { method: 'PATCH', body: { assignee_id: Number(e.target.value) } });
+        await ui.render();
+      }))),
+    ),
+    !completed && el('div', { class: 'chore-card-actions' },
+      el('button', { type: 'button', class: 'btn btn-sm chore-done', onclick: ui.guard(async () => {
+        await api(`/tickets/${item.id}`, { method: 'PATCH', body: { status: 'resolved' } });
+        await ui.render();
+      }) }, 'Mark done'),
+      item.original_due_date && item.original_due_date !== item.due_date && el('span', { class: 'muted' }, `Originally due ${prettyDate(item.original_due_date)}`),
+    ),
+    assignmentEvents.length > 0 && el('details', { class: 'chore-history' }, el('summary', {}, 'Assignment history'),
+      ...assignmentEvents.map((event) => el('p', {}, eventLine(event)))),
+  );
+}
+
+async function renderChores(view, query = {}) {
+  const { el, api } = ui;
+  const payload = await api(`/chores${query.week ? `?week=${encodeURIComponent(query.week)}` : ''}`);
+  const start = payload.week_start || weekStart(query.week || payload.today);
+  const end = payload.week_end || shiftDate(start, 6);
+  const currentWeek = start === weekStart(payload.today);
+  const activeTemplates = payload.chores.filter((c) => !c.archived);
+  const archivedTemplates = payload.chores.filter((c) => c.archived);
+  const templateCards = activeTemplates.map((schedule) => el('article', { class: 'template-row' },
+    el('div', {}, el('strong', {}, schedule.title), el('span', {}, recurrenceLabel(schedule))),
+    el('div', { class: 'planning-actions' },
+      button('Edit chore', () => recurrenceModal(null, schedule, true)),
+      button('Archive', async () => {
+        await api(`/schedules/${schedule.id}`, { method: 'PATCH', body: { archived: true } });
+        await ui.render();
+      }),
+    ),
+  ));
+  const dayCount = payload.assignments.filter((a) => a.status !== 'resolved' && a.status !== 'closed').length;
+  const dayLabel = currentWeek ? 'This week' : (start > weekStart(payload.today) ? 'Coming up' : 'Past week');
+  view.append(el('section', { class: 'chores-hero' },
+    el('div', { class: 'chores-kicker' }, 'THE HOME ROUTINE'),
+    el('div', { class: 'chores-hero-line' },
+      el('div', {}, el('h1', {}, 'Chores'), el('p', {}, 'A shared plan for the everyday things.'),
+        el('div', { class: 'week-switch' },
+          el('a', { class: 'btn btn-sm', href: `#/chores?week=${shiftDate(start, -7)}`, 'aria-label': 'Previous week' }, '←'),
+          el('strong', {}, `${prettyDate(start, { month: 'long', day: 'numeric' })} – ${prettyDate(end, { month: 'long', day: 'numeric', year: 'numeric' })}`),
+          el('a', { class: 'btn btn-sm', href: `#/chores?week=${shiftDate(start, 7)}`, 'aria-label': 'Next week' }, '→'),
+          !currentWeek && el('a', { class: 'week-current', href: '#/chores' }, 'Today'),
+        ),
+      ),
+      el('div', { class: 'chores-count' }, el('span', {}, dayLabel), el('strong', {}, String(dayCount)), el('span', {}, 'still to do')),
+    ),
+    el('div', { class: 'chores-actions' },
+      button('People', () => memberSetup(payload.members)),
+      button('Add a chore', () => recurrenceModal(null, null, true), true),
+    ),
+  ));
+  view.append(el('div', { class: 'roster-grid' }, ...payload.members.map((member, index) => {
+    const assigned = payload.assignments.filter((item) => Number(item.assignee_id) === Number(member.id)).sort((a, b) => a.due_date.localeCompare(b.due_date));
+    const complete = assigned.filter((a) => ['resolved', 'closed'].includes(a.status)).length;
+    return el('section', { class: `roster-column person-${index % 2}` },
+      el('header', { class: 'roster-heading' }, el('span', { class: 'person-dot' }), el('h2', {}, member.name), el('span', { class: 'roster-progress' }, `${complete}/${assigned.length}`)),
+      assigned.length ? el('div', { class: 'chore-stack' }, ...assigned.map((a) => choreCard(a, payload.members, payload.today))) : el('div', { class: 'roster-empty' }, 'No chores assigned this week.'),
+    );
+  })));
+  if (payload.previews?.length) view.append(el('section', { class: 'preview-section' },
+    el('div', { class: 'section-intro' }, el('div', {}, el('span', { class: 'chores-kicker' }, 'NOT COMMITTED'), el('h2', {}, 'Coming up')), el('p', {}, 'These dates depend on finishing the current occurrence. The next chores are not assigned yet.')),
+    el('div', { class: 'preview-list' }, ...payload.previews.map((p) => el('div', { class: 'preview-row' }, el('span', {}, prettyDate(p.due_date)), el('strong', {}, p.title), el('span', { class: 'preview-tag' }, 'Preview')))),
+  ));
+  view.append(el('section', { class: 'templates-section' },
+    el('div', { class: 'section-intro' }, el('div', {}, el('span', { class: 'chores-kicker' }, 'THE REPEATERS'), el('h2', {}, 'Chore templates')), el('p', {}, 'Edit a chore or archive it when it’s no longer part of the rotation. Past assignments stay in the roster.')),
+    activeTemplates.length ? el('div', { class: 'template-list' }, ...templateCards) : el('div', { class: 'roster-empty' }, 'No chore templates yet. Add a chore to start the rotation.'),
+    archivedTemplates.length ? el('details', { class: 'archived-chores' }, el('summary', {}, `Archived templates · ${archivedTemplates.length}`), ...archivedTemplates.map((c) => el('p', {}, `${c.title} · ${recurrenceLabel(c)}`))) : null,
+  ));
+}
+
 export const planningRoutes = [
+  [/^\/chores$/, renderChores, 'chores'],
   [/^\/today$/, renderToday, 'today'],
   [/^\/waiting$/, (view) => renderDeferred(view, 'waiting'), 'waiting'],
   [/^\/snoozed$/, (view) => renderDeferred(view, 'snoozed'), 'snoozed'],

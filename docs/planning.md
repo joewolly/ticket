@@ -98,6 +98,37 @@ Old schedules retain their existing `interval_days` and lead-time behavior.
 The legacy editor remains available; a 30-day interval is labeled **Every 30
 days**, not monthly. Pausing or deleting a schedule preserves its task history.
 
+## Shared household chores
+
+Open **Chores** to set the two household display names and add chore templates.
+The app still has one shared sign-in: either person can see and edit every task.
+Chores are opt-in, use the recurrence rules above, and create new ordinary tasks
+with an assignee. Existing routines are not enrolled or converted into chores.
+Chore tasks also appear in Today, search, task lists, and the calendar, with
+their usual checklist and notification behavior. There are no person-specific
+notifications.
+
+The roster groups assignments by person for a Sunday–Saturday week in the
+configured application timezone. Each task keeps its own due date, not the end
+of the week. Known dates in the current week are assigned when the week starts;
+a new chore due later in the current week joins when created. Only one task per
+chore may remain unfinished. Later dates that depend on finishing it appear as
+conditional previews, not assignments. Missed dates during downtime are
+skipped rather than backfilled; an unfinished task remains overdue with its
+original date and owner.
+
+Weekly load includes completed assignments and open overdue carryovers. When
+loads tie, rotation considers the previous actual assignee and the preceding
+four weeks. Assignments stay put once made. If the other person did a chore,
+reassign that task before marking it done so the right person receives credit;
+the change appears in its history and affects the next rotation. Browse earlier
+weeks to see final assignments and reassignment history.
+
+Editing a chore template changes only future tasks. Edit an existing task
+separately. Archive a chore to stop future assignments without deleting its
+history or closing any unfinished task. Completed chore tasks cannot be
+reopened while a newer occurrence remains unfinished.
+
 ## Install on iPhone
 
 Use the stable private **HTTPS** address described in [Deployment](deployment.md).

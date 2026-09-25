@@ -16,12 +16,13 @@ import {
 } from '../src/api/planning.js';
 import {
   createSchedule,
+  getChoreRoster,
   getSchedule,
   updateSchedule,
   runSchedules,
 } from '../src/api/schedules.js';
-import { nextOccurrence } from '../src/recurrence.js';
-import { civilDate, addDays } from '../src/dates.js';
+import { nextOccurrence, syncRecurrence } from '../src/recurrence.js';
+import { civilDate, addDays, configureDates } from '../src/dates.js';
 import { submitOnce } from '../src/submissions.js';
 import { renderCalendar } from '../src/api/calendar.js';
 
@@ -177,6 +178,46 @@ test('reopening and recompleting a calendar routine does not skip its next occur
   updateTicket(db, task.id, { status: 'open' });
   updateTicket(db, task.id, { status: 'resolved' });
   assert.equal(getSchedule(db, schedule.id).next_due, due);
+});
+
+test('chore recurrence commits only the next known weekly occurrence after completion', (t) => {
+  const db = database(t);
+  configureDates(db, 'UTC');
+  const today = new Date().toISOString().slice(0, 10);
+  const weekStart = addDays(
+    today,
+    -new Date(`${today}T12:00:00Z`).getUTCDay(),
+  );
+  const schedule = createSchedule(db, {
+    title: 'Wipe counters',
+    is_chore: true,
+    next_due: weekStart,
+    time_zone: 'UTC',
+    recurrence: { kind: 'weekly', weekdays: [0, 1, 2, 3, 4, 5, 6] },
+  });
+  assert.equal(schedule.is_chore, true);
+  assert.equal(schedule.lead_days, 0);
+
+  const first = runSchedules(db, { today: weekStart })[0].ticket;
+  assert.equal(first.original_due_date, weekStart);
+  assert.equal(
+    getChoreRoster(db, { week: weekStart, today: weekStart }).previews[0]
+      .conditional,
+    true,
+  );
+
+  // Simulate a completion on the preceding day so its successor is known for
+  // today. Calendar recurrences never create the intervening missed dates.
+  db.prepare(
+    "UPDATE tickets SET status = 'resolved', resolved_at = ? WHERE id = ?",
+  ).run(`${addDays(today, -1)} 12:00:00`, first.id);
+  syncRecurrence(db, first.id);
+  assert.equal(getSchedule(db, schedule.id).next_due, today);
+
+  const successor = runSchedules(db, { today });
+  assert.equal(successor.length, 1);
+  assert.equal(successor[0].ticket.original_due_date, today);
+  assert.equal(successor[0].ticket.schedule_id, schedule.id);
 });
 
 test('reopening older history cannot generate a parallel unfinished recurrence', (t) => {
