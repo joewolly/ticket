@@ -84,10 +84,20 @@ export function syncRecurrence(db, ticketId) {
     row.time_zone,
   );
   const anchor = row.last_due || row.next_due;
-  const next =
+  let next =
     rule.kind === 'after_completion'
       ? addDays(completed, rule.days)
       : nextOccurrence(rule, anchor, completed > anchor ? completed : anchor);
+  if (
+    row.is_chore &&
+    rule.kind !== 'after_completion' &&
+    next < civilDate(new Date(), row.time_zone)
+  ) {
+    // A chore completed after its next calendar date has passed should move to
+    // the next live occurrence, not create a historical catch-up assignment.
+    const today = civilDate(new Date(), row.time_zone);
+    next = nextOccurrence(rule, next, addDays(today, -1));
+  }
   db.prepare('UPDATE schedules SET next_due = ? WHERE id = ?').run(
     next,
     row.id,

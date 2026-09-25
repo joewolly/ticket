@@ -18,6 +18,7 @@ import { projects, savedViews, checklist } from '../src/api/planning.js';
 import {
   createSchedule,
   getSchedule,
+  getChoreRoster,
   runSchedules,
 } from '../src/api/schedules.js';
 import { addAttachment, getAttachment } from '../src/api/attachments.js';
@@ -95,6 +96,227 @@ test('configured civil time zone drives planning filters and new routines', asyn
   });
   assert.equal(legacy.status, 201);
   assert.equal(JSON.parse(legacy.text).time_zone, 'UTC');
+});
+
+test('chore HTTP integration keeps assignment, roster, and occurrence history coherent', async (t) => {
+  const { db, request } = await server(t);
+  const members = db.prepare('SELECT id FROM household_members ORDER BY id').all();
+  assert.equal(members.length, 2, 'the household has two assignable members');
+  const names = ['Chore Member One', 'Chore Member Two'];
+  for (let i = 0; i < members.length; i++) {
+    const renamed = await request(`/api/chores/members/${members[i].id}`, 'PATCH', {
+      name: names[i],
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(JSON.parse(renamed.text).name, names[i]);
+  }
+
+  const today = JSON.parse((await request('/api/planning')).text).today;
+  const week = addDays(
+    today,
+    -new Date(`${today}T12:00:00Z`).getUTCDay(),
+  );
+  const created = await request('/api/schedules', 'POST', {
+    title: 'Wash the towels',
+    is_chore: true,
+    recurrence: { kind: 'interval', days: 7 },
+    next_due: today,
+  });
+  assert.equal(created.status, 201);
+  const schedule = JSON.parse(created.text);
+  assert.equal(schedule.is_chore, true);
+
+  const rosterResponse = await request(`/api/chores?week=${week}`);
+  assert.equal(rosterResponse.status, 200);
+  const roster = JSON.parse(rosterResponse.text);
+  assert.deepEqual(
+    roster,
+    JSON.parse(JSON.stringify(getChoreRoster(db, { week }))),
+  );
+
+  let occurrences = db
+    .prepare('SELECT id FROM tickets WHERE schedule_id = ? ORDER BY id')
+    .all(schedule.id);
+  assert.equal(occurrences.length, 1, 'a roster read materializes one occurrence');
+  const firstId = occurrences[0].id;
+  let first = JSON.parse((await request(`/api/tickets/${firstId}`)).text);
+  assert.equal(first.is_chore, true);
+  assert.ok(members.some((member) => member.id === first.assignee_id));
+  assert.equal(
+    first.assignee_name,
+    names[members.findIndex((member) => member.id === first.assignee_id)],
+  );
+
+  const assignedTo = members.find((member) => member.id !== first.assignee_id);
+  const changed = await request(`/api/tickets/${firstId}`, 'PATCH', {
+    assignee_id: assignedTo.id,
+  });
+  assert.equal(changed.status, 200);
+  first = JSON.parse(changed.text);
+  assert.equal(first.assignee_id, assignedTo.id);
+  assert.equal(first.assignee_name, names[members.findIndex((m) => m.id === assignedTo.id)]);
+  const assigneeEvent = first.events
+    .filter((event) => event.kind === 'assignee')
+    .at(-1);
+  assert.deepEqual(
+    [assigneeEvent?.from_value, assigneeEvent?.to_value],
+    [names[members.findIndex((m) => m.id !== assignedTo.id)], first.assignee_name],
+  );
+  const listed = JSON.parse((await request('/api/tickets?status=all')).text);
+  assert.equal(listed.find((ticket) => ticket.id === firstId).assignee_name, first.assignee_name);
+  const reassignedRoster = JSON.parse(
+    (await request(`/api/chores?week=${week}`)).text,
+  );
+  const rosterAssignment = reassignedRoster.assignments.find(
+    (assignment) => assignment.id === firstId,
+  );
+  assert.equal(rosterAssignment.assignee_id, assignedTo.id);
+  assert.equal(rosterAssignment.assignee_name, first.assignee_name);
+
+  assert.equal(
+    (await request('/api/tickets', 'POST', {
+      title: 'Untrusted assignment',
+      assignee_id: members[0].id,
+    })).status,
+    400,
+    'public ticket creation cannot claim an assignee',
+  );
+  const ordinary = JSON.parse(
+    (await request('/api/tickets', 'POST', { title: 'Ordinary task' })).text,
+  );
+  assert.equal(
+    (await request(`/api/tickets/${ordinary.id}`, 'PATCH', {
+      assignee_id: members[0].id,
+    })).status,
+    400,
+    'ordinary tickets cannot be assigned',
+  );
+  assert.equal(
+    (await request(`/api/tickets/${firstId}`, 'PATCH', { assignee_id: 999999 })).status,
+    400,
+    'assignments must reference a household member',
+  );
+
+  assert.equal((await request(`/api/tickets/${firstId}`, 'PATCH', { status: 'closed' })).status, 200);
+  // Reading again cannot rematerialize the same scheduled date from history.
+  await request(`/api/chores?week=${week}`);
+  await request(`/api/chores?week=${week}`);
+  occurrences = db
+    .prepare('SELECT id, status FROM tickets WHERE schedule_id = ? ORDER BY id')
+    .all(schedule.id);
+  assert.equal(occurrences.length, 1, 'the same occurrence is not duplicated');
+
+  // Model a later generated occurrence while keeping this test independent of
+  // which weekday the test happens to run on.
+  const newerTicket = createTicket(
+    db,
+    { title: 'Later towel occurrence', due_date: addDays(today, 1) },
+    { scheduleId: schedule.id },
+  );
+  db.prepare(
+    'UPDATE tickets SET assignee_id = ?, original_due_date = ? WHERE id = ?',
+  ).run(assignedTo.id, addDays(today, 1), newerTicket.id);
+
+  assert.equal(
+    (await request(`/api/tickets/${firstId}`, 'PATCH', { status: 'open' })).status,
+    400,
+    'an older chore cannot reopen ahead of a newer unfinished occurrence',
+  );
+  assert.equal(
+    (await request('/api/tickets/bulk', 'POST', {
+      ids: [firstId, newerTicket.id],
+      status: 'open',
+    })).status,
+    400,
+    'bulk reopening uses the same chore guard',
+  );
+  assert.equal(JSON.parse((await request(`/api/tickets/${firstId}`)).text).status, 'closed');
+
+  assert.equal(
+    (await request(`/api/schedules/${schedule.id}`, 'PATCH', { archived: true })).status,
+    200,
+  );
+  assert.equal(
+    (await request(`/api/tickets/${firstId}`, 'DELETE')).status,
+    400,
+    'archiving the schedule does not make generated history deletable',
+  );
+  assert.equal((await request(`/api/tickets/${firstId}`)).status, 200);
+  assert.equal((await request(`/api/tickets/${ordinary.id}`, 'DELETE')).status, 204);
+});
+
+test('chore roster reads only materialize current-week chores; maintenance fires routines', async (t) => {
+  const { db, request } = await server(t);
+  const { today } = JSON.parse((await request('/api/planning')).text);
+  const currentWeek = addDays(
+    today,
+    -new Date(`${today}T12:00:00Z`).getUTCDay(),
+  );
+  const pastWeek = addDays(currentWeek, -7);
+  const invalidWeek = addDays(currentWeek, 1);
+
+  const choreResponse = await request('/api/schedules', 'POST', {
+    title: 'Current-week chore',
+    is_chore: true,
+    recurrence: { kind: 'interval', days: 7 },
+    next_due: today,
+  });
+  assert.equal(choreResponse.status, 201);
+  const choreId = JSON.parse(choreResponse.text).id;
+  const routineResponse = await request('/api/schedules', 'POST', {
+    title: 'Ordinary routine',
+    recurrence: { kind: 'interval', days: 7 },
+    next_due: today,
+  });
+  assert.equal(routineResponse.status, 201);
+  const routineId = JSON.parse(routineResponse.text).id;
+  const occurrences = (scheduleId) =>
+    db
+      .prepare('SELECT id FROM tickets WHERE schedule_id = ? ORDER BY id')
+      .all(scheduleId);
+
+  const pastRosterResponse = await request(`/api/chores?week=${pastWeek}`);
+  assert.equal(pastRosterResponse.status, 200);
+  assert.equal(JSON.parse(pastRosterResponse.text).week_start, pastWeek);
+  assert.deepEqual(occurrences(choreId), [], 'past roster reads do not fire chores');
+  assert.deepEqual(
+    occurrences(routineId),
+    [],
+    'past roster reads do not fire ordinary routines',
+  );
+
+  assert.equal(
+    (await request(`/api/chores?week=${invalidWeek}`)).status,
+    400,
+    'a non-Sunday week is rejected',
+  );
+  assert.deepEqual(occurrences(choreId), [], 'invalid weeks do not fire chores');
+  assert.deepEqual(
+    occurrences(routineId),
+    [],
+    'invalid weeks do not fire ordinary routines',
+  );
+
+  const currentRosterResponse = await request(`/api/chores?week=${currentWeek}`);
+  assert.equal(currentRosterResponse.status, 200);
+  const currentRoster = JSON.parse(currentRosterResponse.text);
+  assert.equal(currentRoster.week_start, currentWeek);
+  assert.equal(occurrences(choreId).length, 1, 'current roster reads fire due chores');
+  assert.deepEqual(
+    occurrences(routineId),
+    [],
+    'current roster reads do not fire ordinary routines',
+  );
+
+  const maintenanceResponse = await request('/api/maintenance/run', 'POST');
+  assert.equal(maintenanceResponse.status, 200);
+  const maintenance = JSON.parse(maintenanceResponse.text);
+  const routineFired = maintenance.schedules_fired.find(
+    (entry) => entry.schedule_id === routineId,
+  );
+  assert.ok(routineFired, 'manual maintenance still fires ordinary routines');
+  assert.equal(occurrences(routineId).length, 1);
+  assert.equal(occurrences(routineId)[0].id, routineFired.ticket_id);
 });
 
 test('HTTP planning CRUD, order and saved-view filters execute the public contract', async (t) => {

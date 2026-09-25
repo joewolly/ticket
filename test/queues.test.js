@@ -140,6 +140,7 @@ test('migration preserves version-5 records and attachment bytes; backup restore
   const scratch = await mkdtemp(join(tmpdir(), 'task-hub-migration-'));
   let db;
   let restored;
+  let primaryError;
   try {
     const path = join(scratch, 'legacy.db');
     db = openDatabase(path);
@@ -149,7 +150,15 @@ test('migration preserves version-5 records and attachment bytes; backup restore
     const { queue: _queue, ...before } = getTicket(db, task.id);
     // Reconstruct the immediately preceding schema, then exercise the normal
     // open/migrate path against its on-disk records (not an empty database).
-    db.exec(`DROP TABLE submissions; DROP TABLE saved_views; DROP TABLE checklist_items;
+    db.exec(`DROP INDEX idx_tickets_assignee;
+      DROP INDEX idx_tickets_original_due_date;
+      ALTER TABLE tickets DROP COLUMN assignee_id;
+      ALTER TABLE tickets DROP COLUMN original_due_date;
+      DROP TABLE household_members;
+      ALTER TABLE schedules DROP COLUMN is_chore;
+      ALTER TABLE schedules DROP COLUMN archived;
+      ALTER TABLE schedules DROP COLUMN last_due;
+      DROP TABLE submissions; DROP TABLE saved_views; DROP TABLE checklist_items;
       DROP INDEX idx_tickets_project;
       ALTER TABLE tickets DROP COLUMN project_id;
       ALTER TABLE tickets DROP COLUMN today_rank;
@@ -161,9 +170,10 @@ test('migration preserves version-5 records and attachment bytes; backup restore
       ALTER TABLE schedules DROP COLUMN project_id;
       ALTER TABLE schedules DROP COLUMN checklist;
       ALTER TABLE schedules DROP COLUMN time_zone;
-      ALTER TABLE schedules DROP COLUMN last_due;
       DROP TABLE projects;
-      DROP INDEX idx_tickets_queue_status; ALTER TABLE tickets DROP COLUMN queue; PRAGMA user_version = 5`);
+      DROP INDEX idx_tickets_queue_status;
+      ALTER TABLE tickets DROP COLUMN queue;
+      PRAGMA user_version = 5`);
     db.close();
     db = null;
     db = openDatabase(path);
@@ -178,9 +188,26 @@ test('migration preserves version-5 records and attachment bytes; backup restore
     db.close();
     db = openDatabase(path);
     assert.equal(getTicket(db, task.id).queue, 'someday');
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    restored?.close();
-    db?.close();
-    await rm(scratch, { recursive: true, force: true });
+    let cleanupError;
+    for (const handle of [restored, db]) {
+      try {
+        handle?.close();
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    try {
+      await rm(scratch, { recursive: true, force: true });
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) {
+      if (primaryError) primaryError.cleanupError = cleanupError;
+      else throw cleanupError;
+    }
   }
 });

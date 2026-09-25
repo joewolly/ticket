@@ -36,6 +36,11 @@ const SELECT_TICKET = `
          d.name AS device_name,
          d.type AS device_type,
          (SELECT name FROM projects WHERE id = t.project_id) AS project_name,
+         (SELECT name FROM household_members WHERE id = t.assignee_id)
+           AS assignee_name,
+         COALESCE(
+           (SELECT is_chore FROM schedules WHERE id = t.schedule_id), 0
+         ) AS is_chore,
          (SELECT count(*) FROM checklist_items WHERE ticket_id = t.id) AS checklist_total,
          (SELECT count(*) FROM checklist_items WHERE ticket_id = t.id AND completed = 1) AS checklist_completed,
          (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id) AS comment_count,
@@ -191,6 +196,18 @@ export function updateTicket(db, id, input = {}) {
   const fields = parseTicket(input, { partial: true });
   const tags = tagList(input.tags);
 
+  if (Object.hasOwn(input, 'assignee_id')) {
+    if (!existing.is_chore)
+      throw new ValidationError('Only chore tickets can be assigned');
+    fields.assignee_id = requiredId(input.assignee_id, 'assignee_id');
+    if (
+      !db
+        .prepare('SELECT 1 FROM household_members WHERE id = ?')
+        .get(fields.assignee_id)
+    )
+      throw new ValidationError(`No household member with id ${fields.assignee_id}`);
+  }
+
   if (Object.keys(fields).length === 0 && tags === null) {
     throw new ValidationError('No updatable fields provided');
   }
@@ -212,6 +229,20 @@ export function updateTicket(db, id, input = {}) {
   if (fields.status && fields.status !== existing.status) {
     const wasClosed = CLOSED_STATUSES.includes(existing.status);
     const isClosed = CLOSED_STATUSES.includes(fields.status);
+    if (existing.is_chore && wasClosed && !isClosed) {
+      const newerUnfinished = db
+        .prepare(
+          `SELECT 1 FROM tickets
+            WHERE schedule_id = ? AND id > ?
+              AND status NOT IN (${CLOSED_LIST})
+            LIMIT 1`,
+        )
+        .get(existing.schedule_id, existing.id);
+      if (newerUnfinished)
+        throw new ValidationError(
+          'Cannot reopen this chore while a newer occurrence is unfinished',
+        );
+    }
     if (isClosed && !wasClosed) fields.resolved_at = isoNow();
     if (!isClosed && wasClosed) fields.resolved_at = null;
   }
@@ -221,6 +252,9 @@ export function updateTicket(db, id, input = {}) {
   const afterDeviceName = Object.hasOwn(fields, 'device_id')
     ? deviceName(db, fields.device_id)
     : existing.device_name;
+  const afterAssigneeName = Object.hasOwn(fields, 'assignee_id')
+    ? memberName(db, fields.assignee_id)
+    : existing.assignee_name;
 
   return transaction(db, () => {
     const keys = Object.keys(fields);
@@ -234,6 +268,18 @@ export function updateTicket(db, id, input = {}) {
     recordChanges(db, id, existing, fields, {
       deviceNames: { before: existing.device_name, after: afterDeviceName },
     });
+    if (
+      Object.hasOwn(fields, 'assignee_id') &&
+      fields.assignee_id !== existing.assignee_id
+    ) {
+      recordEvent(
+        db,
+        id,
+        'assignee',
+        existing.assignee_name ?? null,
+        afterAssigneeName,
+      );
+    }
 
     if (tags !== null) {
       const before = existing.tags.join(', ');
@@ -252,7 +298,9 @@ export function updateTicket(db, id, input = {}) {
 }
 
 export function deleteTicket(db, id) {
-  getTicket(db, id);
+  const ticket = getTicket(db, id);
+  if (ticket.is_chore)
+    throw new ValidationError('Generated chore tickets cannot be deleted');
   db.prepare('DELETE FROM tickets WHERE id = ?').run(id);
 }
 
@@ -433,11 +481,23 @@ function deviceName(db, deviceId) {
   );
 }
 
+/** The current household member name by id, used for readable event snapshots. */
+function memberName(db, memberId) {
+  if (!memberId) return null;
+  return (
+    db
+      .prepare('SELECT name FROM household_members WHERE id = ?')
+      .get(memberId)?.name ??
+    null
+  );
+}
+
 /** Turns the group_concat CSV into a real array for the client. */
 function shapeTicket({ tag_csv, ...ticket }) {
   return {
     ...ticket,
     tags: tag_csv ? tag_csv.split(',').sort() : [],
+    is_chore: Boolean(ticket.is_chore),
     is_open: !CLOSED_STATUSES.includes(ticket.status),
   };
 }

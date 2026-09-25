@@ -2,15 +2,19 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase, transaction } from '../src/db.js';
 import { createDevice } from '../src/api/devices.js';
-import { getTicket, listTickets } from '../src/api/tickets.js';
+import { createTicket, getTicket, listTickets } from '../src/api/tickets.js';
 import {
   listSchedules,
   getSchedule,
+  getChoreRoster,
+  updateHouseholdMember,
   createSchedule,
   updateSchedule,
   deleteSchedule,
   runSchedules,
 } from '../src/api/schedules.js';
+import { syncRecurrence } from '../src/recurrence.js';
+import { addDays } from '../src/dates.js';
 
 let db;
 
@@ -25,6 +29,16 @@ const setDue = (id, date) =>
 const today = () => db.prepare(`SELECT date('now') AS d`).get().d;
 const daysFromNow = (n) =>
   db.prepare(`SELECT date('now', ?) AS d`).get(`${n >= 0 ? '+' : ''}${n} days`).d;
+
+const createChore = (title, next_due, weekdays = [0]) =>
+  createSchedule(db, {
+    title,
+    next_due,
+    interval_days: 7,
+    recurrence: { kind: 'weekly', weekdays },
+    is_chore: true,
+  });
+const createTicketForChoreTest = (title) => createTicket(db, { title });
 
 /* ---- Creating ----------------------------------------------------------- */
 
@@ -75,6 +89,259 @@ test('rejects a device that does not exist', () => {
     () => createSchedule(db, { title: 'x', interval_days: 30, device_id: 999 }),
     /No device with id 999/,
   );
+});
+
+test('chore opt-in is explicit and requires a modern recurrence', () => {
+  const routine = createSchedule(db, { title: 'Routine', interval_days: 7 });
+  assert.equal(routine.is_chore, false);
+  assert.equal(routine.archived, false);
+  assert.throws(
+    () => createSchedule(db, { title: 'No cadence', is_chore: true }),
+    /Chore schedules require a modern recurrence/,
+  );
+  assert.deepEqual(listSchedules(db, { is_chore: true }), []);
+  assert.equal(listSchedules(db, { is_chore: false }).length, 1);
+  const chore = createChore('Opted in at creation', '2026-09-20', [0]);
+  assert.throws(
+    () => updateSchedule(db, chore.id, { recurrence: null }),
+    /Chore schedules require a modern recurrence/,
+  );
+  assert.ok(getSchedule(db, chore.id).recurrence);
+  assert.throws(
+    () => updateSchedule(db, chore.id, { is_chore: false }),
+    /is_chore cannot be changed/,
+  );
+  assert.throws(
+    () =>
+      updateSchedule(db, routine.id, {
+        is_chore: true,
+        recurrence: { kind: 'weekly', weekdays: [2] },
+      }),
+    /is_chore cannot be changed/,
+  );
+  assert.equal(updateSchedule(db, chore.id, { archived: true }).archived, true);
+  assert.throws(
+    () => updateSchedule(db, chore.id, { archived: false }),
+    /cannot be unarchived/,
+  );
+  assert.equal(updateSchedule(db, chore.id, { title: 'Archived title' }).archived, true);
+  assert.equal(listSchedules(db, { is_chore: true, archived: true }).length, 1);
+});
+
+test('the persistent roster has two stable editable member IDs', () => {
+  const initial = getChoreRoster(db, { today: '2026-09-25' });
+  assert.deepEqual(initial.members, [
+    { id: 1, name: 'Member 1' },
+    { id: 2, name: 'Member 2' },
+  ]);
+  assert.deepEqual(updateHouseholdMember(db, 1, { name: 'Alex' }), {
+    id: 1,
+    name: 'Alex',
+  });
+  assert.equal(getChoreRoster(db, { today: '2026-09-25' }).members[0].id, 1);
+  assert.throws(() => updateHouseholdMember(db, 1, { name: 'Member 2' }), /unique/);
+});
+
+test('chores cannot be converted from an existing ticket', () => {
+  const task = createTicketForChoreTest('Existing task');
+  assert.throws(
+    () =>
+      createSchedule(db, {
+        title: 'Chore',
+        is_chore: true,
+        next_due: '2026-09-20',
+        recurrence: { kind: 'weekly', weekdays: [0] },
+        source_ticket_id: task.id,
+      }),
+    /cannot be created from an existing ticket/,
+  );
+  assert.equal(getTicket(db, task.id).schedule_id, null);
+});
+
+test('runSchedules can materialize chores without firing ordinary routines', () => {
+  const routine = createSchedule(db, {
+    title: 'Ordinary routine',
+    next_due: '2026-09-20',
+    interval_days: 7,
+  });
+  const chore = createChore('Household chore', '2026-09-20', [0]);
+
+  const choresOnly = runSchedules(db, {
+    today: '2026-09-20',
+    onlyChores: true,
+  });
+  assert.deepEqual(
+    choresOnly.map(({ schedule_id }) => schedule_id),
+    [chore.id],
+  );
+  assert.equal(getSchedule(db, routine.id).last_ticket_id, null);
+  assert.equal(listTickets(db).length, 1);
+
+  const normalSweep = runSchedules(db, { today: '2026-09-20' });
+  assert.deepEqual(
+    normalSweep.map(({ schedule_id }) => schedule_id),
+    [routine.id],
+  );
+});
+
+test('Sunday commits known chores, balances assignment, and exposes later work conditionally', () => {
+  const actualToday = today();
+  const weekday = new Date(`${actualToday}T12:00:00Z`).getUTCDay();
+  const weekStart = addDays(actualToday, -weekday);
+  const daily = createChore('Daily dishes', weekStart, [0, 1, 2, 3, 4, 5, 6]);
+  const weekly = createChore('Weekly floors', weekStart, [0]);
+
+  const fired = runSchedules(db, { today: weekStart });
+  assert.deepEqual(
+    fired.map(({ ticket }) => ticket.assignee_id),
+    [1, 2],
+    'the initial load is split between the two members',
+  );
+  assert.ok(fired.every(({ ticket }) => ticket.original_due_date === weekStart));
+  assert.ok(fired.every(({ ticket }) => ticket.events.some((e) => e.kind === 'assignee')));
+  assert.equal(runSchedules(db, { today: addDays(weekStart, 1) }).length, 0);
+
+  const roster = getChoreRoster(db, { week: weekStart, today: weekStart });
+  assert.equal(roster.week_start, weekStart);
+  assert.equal(roster.week_end, addDays(weekStart, 6));
+  assert.deepEqual(
+    roster.assignments.map(({ assignee_id }) => assignee_id),
+    [1, 2],
+  );
+  assert.deepEqual(roster.previews, [
+    {
+      schedule_id: daily.id,
+      title: 'Daily dishes',
+      due_date: addDays(weekStart, 1),
+      conditional: true,
+    },
+  ]);
+  assert.equal(roster.chores.find((chore) => chore.id === weekly.id).is_chore, true);
+});
+
+test('completion enables a later weekly occurrence without backfilling a missed one', () => {
+  const actualToday = today();
+  const actualWeekday = new Date(`${actualToday}T12:00:00Z`).getUTCDay();
+  const weekStart = addDays(actualToday, -actualWeekday);
+  const schedule = createChore(
+    'Daily counter',
+    weekStart,
+    [0, 1, 2, 3, 4, 5, 6],
+  );
+  const first = runSchedules(db, { today: weekStart })[0].ticket;
+
+  // Complete on the day before the injected current day; the successor is
+  // therefore a known current-week occurrence, not historical catch-up.
+  db.prepare(
+    "UPDATE tickets SET status = 'resolved', resolved_at = ? WHERE id = ?",
+  ).run(`${addDays(actualToday, -1)} 12:00:00`, first.id);
+  syncRecurrence(db, first.id);
+  assert.equal(getSchedule(db, schedule.id).next_due, actualToday);
+
+  const next = runSchedules(db, { today: actualToday });
+  assert.equal(next.length, 1);
+  assert.equal(next[0].ticket.original_due_date, actualToday);
+  assert.notEqual(next[0].ticket.assignee_id, first.assignee_id);
+
+  // A Monday missed while offline is skipped to the next occurrence in this
+  // week, rather than being materialized with a historical due date.
+  const midweek = createChore('Midweek laundry', '2026-09-21', [1, 4]);
+  const missed = runSchedules(db, { today: '2026-09-22' });
+  const laundry = missed.find(({ schedule_id }) => schedule_id === midweek.id);
+  assert.equal(laundry.ticket.original_due_date, '2026-09-24');
+});
+
+test('roster browsing is read-only, validates Sunday starts, and only creates within this week', () => {
+  const schedule = createChore('Future chore', '2026-09-27', [0]);
+  const before = getSchedule(db, schedule.id).next_due;
+  assert.throws(
+    () => getChoreRoster(db, { week: '2026-09-21', today: '2026-09-25' }),
+    /week must be a Sunday/,
+  );
+  const past = getChoreRoster(db, { week: '2026-09-20', today: '2026-09-25' });
+  assert.equal(past.assignments.length, 0);
+  assert.equal(getSchedule(db, schedule.id).next_due, before);
+  assert.equal(runSchedules(db, { today: '2026-09-25' }).length, 0);
+  assert.equal(listTickets(db).length, 0);
+});
+
+test('deleting a chore archives it and retains its open assignment history', () => {
+  const schedule = createChore('Keep the entry clear', '2026-09-20', [0]);
+  const [{ ticket }] = runSchedules(db, { today: '2026-09-20' });
+
+  deleteSchedule(db, schedule.id);
+
+  assert.equal(getSchedule(db, schedule.id).archived, true);
+  assert.equal(getTicket(db, ticket.id).assignee_id, 1);
+  assert.equal(getChoreRoster(db, { week: '2026-09-20', today: '2026-09-20' }).assignments.length, 1);
+  assert.equal(runSchedules(db, { today: '2026-09-27' }).length, 0);
+  assert.equal(listSchedules(db, { archived: true }).length, 1);
+});
+
+test('an overdue open chore retains its original owner and date as a carryover', () => {
+  const prior = createChore('Old chore', '2026-09-13', [0]);
+  const [{ ticket: overdue }] = runSchedules(db, { today: '2026-09-13' });
+  const next = createChore('New week chore', '2026-09-20', [0]);
+
+  const created = runSchedules(db, { today: '2026-09-20' });
+  const current = created.find(({ schedule_id }) => schedule_id === next.id).ticket;
+  db.prepare('UPDATE tickets SET due_date = ? WHERE id = ?').run(
+    '2026-09-28',
+    overdue.id,
+  );
+  const roster = getChoreRoster(db, {
+    week: '2026-09-20',
+    today: '2026-09-20',
+  });
+  const carried = roster.assignments.find(({ id }) => id === overdue.id);
+  assert.equal(carried.assignee_id, overdue.assignee_id);
+  assert.equal(carried.original_due_date, '2026-09-13');
+  assert.equal(carried.due_date, '2026-09-28');
+  assert.notEqual(
+    current.assignee_id,
+    overdue.assignee_id,
+    'the carryover shifts new work to the less-loaded member',
+  );
+  assert.ok(roster.chores.some(({ id }) => id === prior.id));
+});
+
+test('historical chore starts advance to the current week without backfilling', () => {
+  const actualToday = today();
+  const weekday = new Date(`${actualToday}T12:00:00Z`).getUTCDay();
+  const oldStart = addDays(actualToday, -45);
+  const schedule = createChore('Historical start', oldStart, [weekday]);
+
+  const [{ ticket }] = runSchedules(db, { today: actualToday });
+  assert.equal(ticket.schedule_id, schedule.id);
+  assert.equal(ticket.due_date, actualToday);
+  assert.equal(ticket.original_due_date, actualToday);
+});
+
+test('fair final tie-break varies by schedule rather than favoring the lower member ID', () => {
+  const firstWeek = '2026-01-04';
+  const firstSchedule = createChore('First fair chore', firstWeek, [0]);
+  const [first] = runSchedules(db, { today: firstWeek });
+  db.prepare(
+    "UPDATE tickets SET status = 'resolved', resolved_at = '2026-01-04 12:00:00' WHERE id = ?",
+  ).run(first.ticket.id);
+  deleteSchedule(db, firstSchedule.id);
+
+  const secondWeek = '2026-02-15';
+  const secondSchedule = createChore('Second fair chore', secondWeek, [0]);
+  const laterFired = runSchedules(db, { today: secondWeek });
+  assert.deepEqual(
+    laterFired.map(({ schedule_id }) => schedule_id),
+    [secondSchedule.id],
+    'the completed archived recurrence is not generated again',
+  );
+  const [second] = laterFired;
+
+  assert.notEqual(
+    first.ticket.assignee_id,
+    second.ticket.assignee_id,
+    'with no current or prior-four-week load and no schedule-specific prior owner, the tie shifts',
+  );
+  assert.equal(second.schedule_id, secondSchedule.id);
 });
 
 /* ---- Firing ------------------------------------------------------------- */

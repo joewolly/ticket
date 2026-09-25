@@ -1,4 +1,4 @@
-const CACHE = 'taskhub-capture-v1';
+const CACHE = 'taskhub-capture-v2';
 const ASSETS = [
   '/capture.html',
   '/app.js',
