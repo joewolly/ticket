@@ -213,6 +213,12 @@ null or empty for migrated tasks.
 | Schedule create/update | `recurrence`, `project_id`, `checklist` template strings, `time_zone` |
 | Schedule creation | Optional `source_ticket_id` to make an existing task recurring |
 | Exports | New planning columns; additional `projects`, `views`, `checklists` entities |
+| Schedule create/update | `is_chore` (set at creation only; chores need a `recurrence`, use the app timezone and zero lead time, and cannot start from `source_ticket_id`), `archived` (archived chores cannot be unarchived) |
+| Schedule filters | `is_chore`, `archived` |
+| `DELETE /api/schedules/:id` | Archives a chore instead of deleting it |
+| `GET /api/chores` | Roster for one Sunday–Saturday week (`week=YYYY-MM-DD`, a Sunday; defaults to the current week). Reading the current week fires due chores. |
+| `PATCH /api/chores/members/:id` | Rename one of the two household members (`name`, unique) |
+| Ticket update | `assignee_id`, only on chore tasks |
 
 Recurrence rule examples:
 
@@ -255,8 +261,9 @@ After upgrading, verify:
   WebKit emulation does not verify iOS installation or share-sheet behavior.
 
 The service worker caches only the static capture interface. When changing any
-cached asset, bump the cache version in `public/sw.js`; a new worker waits for
-old tabs to close before activating its complete asset set.
+cached asset, bump the cache version in `public/sw.js`. A new worker activates
+as soon as its complete asset set is cached, takes over open pages, and deletes
+older capture caches, so a deploy does not wait for every tab to close.
 
 The app icon uses the Lucide check glyph (ISC license); see
 [third-party notices](third-party-notices.md).

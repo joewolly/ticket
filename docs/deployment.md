@@ -1,12 +1,20 @@
 # Daily-use deployment
 
-Target: the homelab Docker server at `192.168.100.38`. The app stays private to
-your tailnet, with password sign-in and HTTPS through Tailscale Serve.
+Target: the homelab Docker server `docker-main` (`192.168.100.38` on the LAN).
+The app stays private to your tailnet, with password sign-in and HTTPS through
+Tailscale Serve.
 
-**Deployment is pending review/merge and host verification.** The implementation
-session could reach SSH but did not have a trusted host key or verified login.
-No live database, container, Tailscale configuration, or phone was changed.
-The final private URL must be recorded after Serve reports it; it is not yet known.
+**Task Hub is deployed and in daily use.** It runs from `/opt/task-hub` as
+Compose project `task-hub` (container `homelab-ticket`) with the private
+override, bound only to `127.0.0.1:8080`, behind a tailnet-only Serve route
+with no Funnel. The private HTTPS address is not recorded here because this
+repository is public. The first install is done, so later releases follow
+[Backups, upgrade, and recovery](#backups-upgrade-and-recovery). Outstanding
+checks are listed in the [acceptance record](#acceptance-record).
+
+When the computer is off the LAN, reach the host over Tailscale SSH but keep
+strict host-key checking against the verified LAN key (for example with
+`HostKeyAlias=192.168.100.38` in the SSH config entry).
 
 ## Preflight and existing data
 
@@ -41,7 +49,7 @@ an empty named volume. Do not start a second instance against the same database
 or use `docker compose down -v`. For a fresh install use `/opt/task-hub` and
 project name `task-hub`. The commands below run on the Linux Docker host.
 
-## Install after review and merge
+## Fresh install
 
 Check out the reviewed, merged commit in the deployment directory. For an
 existing installation take the pre-migration snapshot below **before** starting
@@ -179,14 +187,19 @@ Verify login, task history, attachments, and health again.
 
 ## Acceptance record
 
-Do not mark daily-use setup complete until all are recorded:
+For each release, record the reviewed merge SHA, the previous image ID, and
+the pre-upgrade snapshot name alongside the deployment, not in this repository.
 
-- Reviewed merge SHA, previous image ID (for an upgrade), actual project/mounts,
-  and the private HTTPS URL.
-- Loopback-only Docker binding, private Serve route, and no public Funnel route.
-- Task and attachment persistence across a container restart.
-- A successful snapshot and isolated restore drill.
-- Owner-confirmed phone access over cellular with Tailscale connected.
+| Check | Status |
+| --- | --- |
+| Project, mounts, and private HTTPS URL confirmed | Done |
+| Loopback-only Docker binding, tailnet-only Serve, no Funnel | Done |
+| Pre-upgrade snapshot and prior image kept on each upgrade | Done |
+| Scheduled backup ran and its SQLite copy restored cleanly (integrity check, schema, row counts) | Done |
+| Full isolated restore drill (restore container, attachments, restart) | Outstanding |
+| Tasks survive container recreation (every upgrade so far) | Done |
+| Attachment contents confirmed after a restart | Outstanding |
+| Owner-confirmed phone access over cellular with Tailscale connected | Outstanding |
 
-Current status: **pending live deployment**. Local automated tests and browser
-checks establish app behavior, not the state of this server or phone.
+Local automated tests and browser checks establish app behavior, not the state
+of this server or phone.

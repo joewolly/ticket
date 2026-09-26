@@ -219,7 +219,7 @@ AUTH_DISABLED=true
 Setting both is an error rather than a silent precedence rule.
 
 Scripts and cron jobs can't hold a cookie, so set `API_TOKEN` for them and
-pass it as a bearer token:
+pass it as a bearer token (or in an `X-API-Key` header):
 
 ```sh
 curl -X POST http://localhost:8080/api/tickets \
@@ -340,6 +340,10 @@ ignored.
 | `TZ`                           | `UTC`               | Container timezone                             |
 | `APP_TIME_ZONE`                | `America/Denver`    | Civil dates for planning, deadlines, follow-ups, and new routines; legacy schedules retain UTC |
 
+Docker Compose also reads `TASK_HUB_PORT` (the loopback host port, default
+`8080`) and `TASK_HUB_VERSION` (the image tag, default `latest`; set it to the
+deployed commit so rollback has a known image).
+
 ## API
 
 The UI is a client of the same JSON API, so scripts and cron jobs can file
@@ -383,7 +387,9 @@ tickets too — useful for having a monitoring script open a ticket on failure.
 
 Every endpoint except `/api/auth/login` requires either a session cookie or an
 API token; unauthenticated API calls get a `401`, and page requests redirect to
-`/login`.
+`/login`. The exceptions are `/api/health` when `PUBLIC_HEALTH` is set, the
+calendar feed's `?token=` form, and the static capture shell described in
+[Planning and iPhone capture](docs/planning.md).
 
 Ticket list filters: `queue` (`inbox`, `next`, or `someday`),
 `status` (a specific status, `done` for resolved and closed, or `all`; defaults to
@@ -396,7 +402,10 @@ Create/update/bulk-update accept `queue`. Omitting it on create defaults to
 `next`; explicit invalid or empty values are rejected. Completion remains in
 `status`, not `queue`. CSV appends a `queue` column; JSON exports include it.
 
-Schedule list filters: `paused` and `device_id`.
+Schedule list filters: `paused`, `device_id`, `is_chore`, and `archived`.
+
+Planning, projects, saved views, checklists, and the chore roster add more
+endpoints; see [API additions](docs/planning.md#api-additions).
 
 Export parameters: `entity` (`tickets`, `devices`, `schedules`), `format`
 (`json`, `csv`), and for tickets an optional `status`.
@@ -416,10 +425,17 @@ src/
   notify.js      Webhook delivery, the overdue/due-soon sweeps, and the digest
   backup.js      VACUUM INTO snapshots with retention
   static.js      Static file serving for the frontend
-  api/           devices.js, tickets.js, schedules.js, stats.js, events.js,
-                 warranty.js, attachments.js, calendar.js, export.js,
-                 metrics.js — the data layer
-public/          index.html, app.js, login.html, styles.css — dependency-free SPA
+  dates.js       Civil dates in APP_TIME_ZONE and date-only arithmetic
+  recurrence.js  Routine rules and next-occurrence calculation
+  submissions.js Idempotency-Key deduplication for capture retries
+  api/           devices.js, tickets.js, schedules.js (including chores),
+                 planning.js, stats.js, events.js, warranty.js,
+                 attachments.js, calendar.js, export.js, metrics.js — the
+                 data layer
+public/          index.html, app.js, planning.js, login.html, styles.css —
+                 dependency-free SPA; capture.html, capture.js,
+                 draft-store.js, sw.js, manifest.webmanifest — installable
+                 capture with offline drafts
 test/            Unit tests per module plus HTTP integration tests
 ```
 
