@@ -234,7 +234,8 @@ one client and a single attacker locks out the household. It is off by default
 because the opposite mistake is worse: any client can send `X-Forwarded-For`, so
 trusting it when no proxy is in front lets an attacker rotate the header and
 guess passwords indefinitely. Only turn it on when something you control really
-does sit in front.
+does sit in front. The client address is taken from the last `X-Forwarded-For`
+entry — the one your proxy appended — so this assumes a single proxy hop.
 
 Two caveats worth knowing. Serving over plain HTTP means the password crosses
 your LAN in the clear — fine against the casual case this is built for, not

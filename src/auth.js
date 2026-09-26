@@ -171,9 +171,23 @@ export function parseCookies(header = '') {
   for (const part of header.split(';')) {
     const index = part.indexOf('=');
     if (index === -1) continue;
-    jar[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim());
+    jar[part.slice(0, index).trim()] = decodeCookieValue(part.slice(index + 1).trim());
   }
   return jar;
+}
+
+/**
+ * The cookie header is client-controlled and parsed before authentication, so a
+ * stray '%' must not throw: that used to escape the request handler and take
+ * the whole process down. A value that fails to decode is kept raw, which can
+ * never match a real session token.
+ */
+function decodeCookieValue(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 export function sessionCookie(token, config, expiresAt) {
@@ -265,11 +279,15 @@ export function authorize(db, config, req, pathname) {
  * when a proxy *is* in front is just as wrong in the other direction: every
  * request would share the proxy's address, so one attacker's failures would
  * lock out everyone. Hence the explicit switch.
+ *
+ * The last entry is the one to read, not the first. A proxy appends the address
+ * it received the connection from, so the last entry is the only one it vouches
+ * for; everything before it arrived in the client's own request and can say
+ * anything. This assumes a single proxy hop, which is the documented setup.
  */
 export function clientKey(req, config = {}) {
   if (config.trustProxy) {
-    const [first] = String(req.headers?.['x-forwarded-for'] ?? '').split(',');
-    const client = first?.trim();
+    const client = String(req.headers?.['x-forwarded-for'] ?? '').split(',').at(-1).trim();
     if (client) return client;
   }
   return req.socket?.remoteAddress ?? 'unknown';

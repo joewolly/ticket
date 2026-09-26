@@ -159,6 +159,13 @@ test('parses cookie headers, including extra whitespace', () => {
   assert.deepEqual(parseCookies('homelab_session=abc%3Dd'), { homelab_session: 'abc=d' });
 });
 
+test('a malformed cookie value is kept raw instead of throwing', () => {
+  assert.deepEqual(parseCookies('homelab_session=%; other=%E0%A4%A'), {
+    homelab_session: '%',
+    other: '%E0%A4%A',
+  });
+});
+
 /* ---- HTTP: gate --------------------------------------------------------- */
 
 test('blocks the API without a session', async () => {

@@ -605,9 +605,33 @@ export function createApp(db, config = { enabled: false }) {
   const limiter = createRateLimiter(config.rateLimit);
   const notifier = createNotifier(config);
 
+  /**
+   * Anything that throws outside a route handler — while parsing the URL or
+   * the cookie header, say — would otherwise reject this promise with nobody
+   * listening, and an unhandled rejection kills the process. That made a single
+   * malformed request from an unauthenticated client enough to take the server
+   * down (and wipe the in-memory login lockout with it), so answer 500 instead.
+   */
   return async function handle(req, res) {
+    try {
+      await serve(req, res);
+    } catch (err) {
+      log.error('unhandled request error', {
+        method: req.method,
+        // Path only: the calendar feed carries its token in the query string.
+        path: String(req.url).split('?')[0],
+        ...errorFields(err),
+      });
+      if (!res.headersSent) sendJson(res, 500, { error: 'Internal server error' });
+      else res.destroy();
+    }
+  };
+
+  async function serve(req, res) {
     const startedAt = process.hrtime.bigint();
-    const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+    // The base is fixed rather than taken from the Host header: only the path
+    // and query are read, and a malformed Host used to make this throw.
+    const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
 
     for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
@@ -703,7 +727,7 @@ export function createApp(db, config = { enabled: false }) {
       });
       sendJson(res, 500, { error: 'Internal server error' });
     }
-  };
+  }
 }
 
 export function createServer(db, config) {

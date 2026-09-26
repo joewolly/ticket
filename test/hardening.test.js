@@ -1,5 +1,6 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { connect } from 'node:net';
 import { openDatabase } from '../src/db.js';
 import { createServer } from '../src/server.js';
 import { resetThrottle } from '../src/auth.js';
@@ -141,12 +142,60 @@ test('behind a declared proxy, one client is locked out without taking the rest 
   });
 });
 
-test('reads only the first entry in a forwarded chain', async () => {
+test('reads the entry the proxy appended, not the ones the client sent', async () => {
   await withServer({ ...secured, trustProxy: true }, async ({ request }) => {
+    // The proxy appends the real peer (198.51.100.7) after whatever the client
+    // claimed. Rotating the claimed part must not buy fresh attempts.
     for (let i = 0; i < 5; i++) {
-      await failLogin(request, '198.51.100.7, 10.0.0.1, 10.0.0.2');
+      assert.equal((await failLogin(request, `10.9.9.${i}, 198.51.100.7`)).status, 401);
     }
+    assert.equal((await failLogin(request, '10.9.9.99, 198.51.100.7')).status, 429);
     assert.equal((await failLogin(request, '198.51.100.7')).status, 429);
+  });
+});
+
+/* ---- Malformed requests -------------------------------------------------- */
+
+/**
+ * Sends a hand-written request over a raw socket — fetch refuses to set Host or
+ * send some of the malformed input these tests need — and resolves with the
+ * status code, or null if no response arrived. The timeout matters: when a
+ * request crashes the handler, the connection is left open rather than closed,
+ * and without it a regression would hang the suite instead of failing it.
+ */
+function rawRequest(base, headers) {
+  const { port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    // write, not end: a half-closed socket makes Node abandon a response that
+    // is still streaming. Connection: close has the server hang up instead.
+    const socket = connect(Number(port), '127.0.0.1', () =>
+      socket.write(`${headers}\r\nConnection: close\r\n\r\n`),
+    );
+    let reply = '';
+    socket.setTimeout(2000, () => socket.destroy());
+    socket.on('data', (chunk) => (reply += chunk));
+    socket.on('error', reject);
+    socket.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(reply)?.[1]) || null));
+  });
+}
+
+test('a malformed cookie is refused, not fatal', async () => {
+  await withServer(secured, async ({ request, base }) => {
+    const status = await rawRequest(
+      base,
+      'GET /api/tickets HTTP/1.1\r\nHost: localhost\r\nCookie: homelab_session=%',
+    );
+    assert.equal(status, 401);
+    // The server is still up and still enforcing the gate.
+    assert.equal((await request('GET', '/api/tickets')).status, 401);
+  });
+});
+
+test('a malformed Host header is served, not fatal', async () => {
+  await withServer(secured, async ({ request, base }) => {
+    const status = await rawRequest(base, 'GET /login HTTP/1.1\r\nHost: a b');
+    assert.equal(status, 200);
+    assert.equal((await request('GET', '/login')).status, 200);
   });
 });
 
