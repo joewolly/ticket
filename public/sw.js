@@ -1,4 +1,4 @@
-const CACHE = 'taskhub-capture-v2';
+const CACHE = 'taskhub-capture-v3';
 const ASSETS = [
   '/capture.html',
   '/app.js',
@@ -11,7 +11,9 @@ const ASSETS = [
   '/apple-touch-icon.png',
 ];
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting()),
+  );
 });
 self.addEventListener('activate', (event) => {
   event.waitUntil(
